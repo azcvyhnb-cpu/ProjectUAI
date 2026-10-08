@@ -15647,4 +15647,6 @@ end
 return aa
 end)()
 
-return WindUI
+return function(_env)
+	return WindUI
+end
