@@ -279,6 +279,18 @@ return function(env)
         holder.Position = UDim2.fromScale(0, 0)
         holder.Parent = canvas
 
+        -- app.layoutNavigation() expects a legacy header object. Give it a zero-size
+        -- compatibility frame so it can continue managing the original content layout
+        -- without moving WindUI's real topbar.
+        local legacyHeader = Instance.new("Frame")
+        legacyHeader.Name = "LegacyHeaderAdapter"
+        legacyHeader.BackgroundTransparency = 1
+        legacyHeader.BorderSizePixel = 0
+        legacyHeader.Size = UDim2.fromOffset(0, 0)
+        legacyHeader.Parent = holder
+
+        M.window.header = legacyHeader
+
         -- Bridge the original UAI application into WindUI without rewriting its
         -- feature modules. This preserves the sidebar, conversations, code explorer,
         -- chat composer, context controls, provider/model UI, tools, logs, settings,
