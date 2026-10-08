@@ -1,49 +1,213 @@
--- WindUI presentation shell for Project UAI.
--- Keeps the existing panel/agent architecture and replaces only the chrome/navigation.
+-- WindUI presentation adapter for Project UAI.
+-- IMPORTANT: this is deliberately a compatibility shell. It keeps the complete
+-- Project UAI application surface (sidebar, conversations, chat, code, agents,
+-- providers, tools, settings, logs, dialogs and session wiring) and changes only
+-- the outer window/chrome to WindUI.
 return function(env)
     local WindUI = env.require("ui/windui")
     local config = env.require("runtime/config")
     local sessions = env.require("agent/session")
-    local providers = env.require("provider/registry")
-    local place = env.require("runtime/place")
-    local util = env.require("runtime/util")
-    local log = env.require("runtime/log")
 
-    local M = {}
-
-    local PANEL_META = {
-        { id = "chat", label = "Chat", icon = "message-circle" },
-        { id = "cowork", label = "Cowork", icon = "briefcase" },
-        { id = "code", label = "Code", icon = "code-2" },
-        { id = "agents", label = "Subagents", icon = "users" },
-        { id = "providers", label = "Providers", icon = "sliders-horizontal" },
-        { id = "tools", label = "Tools", icon = "wrench" },
-        { id = "settings", label = "Settings", icon = "settings" },
-        { id = "logs", label = "Logs", icon = "file-text" },
+    local M = {
+        app = nil,
+        window = nil,
+        tab = nil,
+        canvas = nil,
+        selecting = false,
     }
+
+    local function safe(callback)
+        return function(...)
+            local ok, err = pcall(callback, ...)
+            if not ok then
+                local log = env.require("runtime/log")
+                log.error("windui", tostring(err))
+            end
+        end
+    end
+
+    local function showPanel(app, id)
+        if not app then return end
+        app.show(id)
+    end
+
+    local function openUtilityDialog(title, buttons)
+        if not M.window or not M.window.native then return end
+        return M.window.native:Dialog({
+            Title = title,
+            Width = 430,
+            Buttons = buttons,
+        })
+    end
+
+    local function buildMoreDialog(app)
+        return openUtilityDialog("Project UAI", {
+            {
+                Title = "Settings",
+                Icon = "settings",
+                Callback = safe(function()
+                    app.showSettingsDialog("general")
+                end),
+            },
+            {
+                Title = "Providers & models",
+                Icon = "sliders-horizontal",
+                Callback = safe(function()
+                    app.show("providers")
+                end),
+            },
+            {
+                Title = "What's new",
+                Icon = "sparkles",
+                Callback = safe(function()
+                    app.showChangelog()
+                end),
+            },
+            {
+                Title = "ProjectUAI",
+                Icon = "book-open",
+                Callback = safe(function()
+                    env.require("ui/project").open()
+                end),
+            },
+            {
+                Title = "About this build",
+                Icon = "info",
+                Callback = safe(function()
+                    app.showAbout()
+                end),
+            },
+            {
+                Title = "Join Discord",
+                Icon = "globe",
+                Callback = safe(function()
+                    app.joinDiscord()
+                end),
+            },
+            {
+                Title = "Donate",
+                Icon = "heart",
+                Callback = safe(function()
+                    app.donate()
+                end),
+            },
+            {
+                Title = "Unload UAI",
+                Icon = "log-out",
+                Variant = "Red",
+                Callback = safe(function()
+                    local globals = (type(getgenv) == "function") and getgenv() or nil
+                    local live = globals and globals.UAI
+                    if live and live.destroy then
+                        live.destroy()
+                    else
+                        env.require("runtime/dispose").drain()
+                        if M.window then M.window.destroy() end
+                    end
+                end),
+            },
+        })
+    end
+
+    local function buildChrome(app)
+        local w = M.window.native
+
+        -- WindUI owns the visible chrome. The old UAI application chrome is NOT
+        -- discarded: app.buildBody() below still creates the complete UAI sidebar,
+        -- conversation list and all existing panels inside the WindUI content area.
+
+        w:Topbar.Button({
+            Name = "New conversation",
+            Icon = "plus",
+            LayoutOrder = 1,
+            Callback = safe(function()
+                app.newConversation()
+            end),
+        })
+
+        w:Topbar.Button({
+            Name = "Search conversations",
+            Icon = "search",
+            LayoutOrder = 2,
+            Callback = safe(function()
+                app.showSearch()
+            end),
+        })
+
+        w:Topbar.Button({
+            Name = "Folders",
+            Icon = "folder",
+            LayoutOrder = 3,
+            Callback = safe(function()
+                app.manageFolders()
+            end),
+        })
+
+        w:Topbar.Button({
+            Name = "Back",
+            Icon = "arrow-left",
+            LayoutOrder = 4,
+            Callback = safe(function()
+                app.back()
+            end),
+        })
+
+        w:Topbar.Button({
+            Name = "Forward",
+            Icon = "arrow-right",
+            LayoutOrder = 5,
+            Callback = safe(function()
+                app.forward()
+            end),
+        })
+
+        w:Topbar.Button({
+            Name = "More",
+            Icon = "ellipsis",
+            LayoutOrder = 6,
+            Callback = safe(function()
+                buildMoreDialog(app)
+            end),
+        })
+
+        -- Keep the old keyboard contract too.
+        w:SetToggleKey(Enum.KeyCode.RightShift)
+    end
 
     local function makeWindow()
         local w = WindUI:CreateWindow({
             Title = "Project UAI",
             Author = "Universal AI Agent",
+            Icon = "bot",
             Folder = "ProjectUAI",
             Theme = config.get("ui.theme", "Dark") == "Light" and "Light" or "Dark",
             NewElements = true,
-            HideSearchBar = false,
+            HideSearchBar = true,
             AutoScale = true,
-            Size = UDim2.fromOffset(760, 560),
+            Resizable = true,
+            Size = UDim2.fromOffset(900, 620),
             MinSize = Vector2.new(520, 380),
-            MaxSize = Vector2.new(1100, 820),
+            MaxSize = Vector2.new(1280, 900),
+            SideBarWidth = 180,
+            HidePanelBackground = true,
         })
+
+        -- The old UAI sidebar remains the actual application navigation. WindUI's
+        -- own tab rail is therefore hidden rather than duplicated.
+        pcall(function()
+            if w.UIElements and w.UIElements.SideBar then
+                w.UIElements.SideBar.Visible = false
+            end
+        end)
 
         local wrapper = {
             native = w,
             visible = false,
             maximised = false,
-            root = w.UIElements and w.UIElements.Main or nil,
-            header = w.UIElements and w.UIElements.Main or nil,
+            body = nil,
+            header = w.UIElements and w.UIElements.Main and w.UIElements.Main.Main
+                and w.UIElements.Main.Main.Topbar or nil,
             headerHeight = 0,
-            body = w.UIElements and w.UIElements.MainBar or nil,
         }
 
         function wrapper.show()
@@ -86,99 +250,83 @@ return function(env)
 
         M.app = app
         M.window = makeWindow()
-        M.screen = app.screen
-        M.tabs = {}
-        M.tabById = {}
 
-        -- WindUI owns the window chrome. Existing UAI panels remain native UAI
-        -- surfaces and are mounted into each tab's content canvas.
-        app.body = M.window.body
-        app.panels = app.panels or {}
-        app.chatPanel = nil
+        -- One WindUI tab is intentional. Project UAI already has a complete
+        -- navigation system with sidebar + panel routing. Replacing that with a
+        -- second navigation system was the reason the previous port lost features.
+        local tab = M.window.native:Tab({
+            Title = "UAI",
+            Icon = "bot",
+            ShowTabTitle = false,
+        })
+        M.tab = tab
 
-        for _, spec in ipairs(PANEL_META) do
-            local tab = M.window.native:Tab({
-                Title = spec.label,
-                Icon = spec.icon,
-                ShowTabTitle = false,
-            })
-            M.tabs[#M.tabs + 1] = tab
-            M.tabById[spec.id] = tab
+        local canvas = tab.UIElements and tab.UIElements.ContainerFrameCanvas
+        if not canvas then
+            error("WindUI tab content canvas is unavailable")
+        end
+        M.canvas = canvas
+        canvas.ClipsDescendants = true
 
-            local canvas = tab.UIElements and tab.UIElements.ContainerFrameCanvas
-            local list = tab.UIElements and tab.UIElements.ContainerFrame
-            if list then
-                list.Visible = false
+        local list = tab.UIElements and tab.UIElements.ContainerFrame
+        if list then list.Visible = false end
+
+        local holder = Instance.new("Frame")
+        holder.Name = "ProjectUAIApp"
+        holder.BackgroundTransparency = 1
+        holder.BorderSizePixel = 0
+        holder.Size = UDim2.fromScale(1, 1)
+        holder.Position = UDim2.fromScale(0, 0)
+        holder.Parent = canvas
+
+        -- Bridge the original UAI application into WindUI without rewriting its
+        -- feature modules. This preserves the sidebar, conversations, code explorer,
+        -- chat composer, context controls, provider/model UI, tools, logs, settings,
+        -- permissions, asks, notifications and all existing callbacks.
+        app.window = M.window
+        M.window.body = holder
+        M.window.headerHeight = 0
+        app.body = holder
+        app.windShell = M
+
+        buildChrome(app)
+
+        -- Build the original UAI body exactly once inside the WindUI content canvas.
+        app.buildBody()
+
+        M.window.onShow = function()
+            if app.panels and app.panels[app.panel] and app.panels[app.panel].setVisible then
+                app.panels[app.panel].setVisible(true)
             end
-
-            if canvas then
-                canvas.ClipsDescendants = true
-                local holder = Instance.new("Frame")
-                holder.Name = "UAI_" .. spec.id
-                holder.BackgroundTransparency = 1
-                holder.BorderSizePixel = 0
-                holder.Size = UDim2.fromScale(1, 1)
-                holder.Position = UDim2.fromScale(0, 0)
-                holder.Parent = canvas
-                M.holders = M.holders or {}
-                M.holders[spec.id] = holder
-
-                holder.Destroying:Connect(function()
-                    if app.panels[spec.id] and app.panels[spec.id].destroy then
-                        pcall(app.panels[spec.id].destroy)
-                    end
-                end)
-            end
-
-            if tab.UIElements and tab.UIElements.Main then
-                tab.UIElements.Main.Activated:Connect(function()
-                    if M.selecting then return end
-                    M.selecting = true
-                    app.showPanel(spec.id)
-                    M.selecting = false
-                end)
-            end
+            if app.syncNav then app.syncNav() end
         end
 
-        function M.select(id)
-            local tab = M.tabById[id]
-            local holder = M.holders and M.holders[id]
-            if not tab or not holder then return false end
-            M.selecting = true
-            app.body = holder
-            app.showPanel(id)
-            M.window.native:SelectTab(tab.Index)
-            M.selecting = false
-            return true
-        end
-
-        -- Build only the current panel. Other panels are lazy and retain all their
-        -- existing runtime/state behavior.
-        app.body = M.holders[app.panel] or app.body
-        app.showPanel(app.panel or "chat")
-
-        local session = sessions.current()
-        local record = providers.active()
-        local model = record and util.trim(tostring(record.model or "")) or ""
-        local subtitle = place.label()
-        if record then
-            subtitle = subtitle .. "  ·  " .. tostring(record.label or "provider")
-            if model ~= "" then subtitle = subtitle .. "  " .. model end
-        end
-        if session and session.title and session.title ~= "" then
-            M.window.native:SetTitle("Project UAI")
+        M.window.onHide = function()
+            if app.panels and app.panels[app.panel] and app.panels[app.panel].setVisible then
+                app.panels[app.panel].setVisible(false)
+            end
         end
 
         M.window.show()
         return M
     end
 
+    -- Called by app.showPanel after the panel has been built. It only changes the
+    -- WindUI shell state; it never calls app.showPanel, avoiding recursion.
+    function M.syncSelection(id)
+        if not M.window or not M.tab then return end
+        -- There is only one WindUI tab. The actual panel selection remains UAI's
+        -- existing sidebar/router, so no feature is duplicated or lost.
+        M.activePanel = id
+    end
+
     function M.show(id)
-        if id then
-            M.select(id)
-        else
-            M.window.show()
+        if not M.window then
+            return M.mount(M.app)
         end
+        if id and M.app then self = M end
+        M.window.show()
+        return M
     end
 
     function M.hide()
@@ -192,9 +340,9 @@ return function(env)
     function M.destroy()
         if M.window then M.window.destroy() end
         M.window = nil
-        M.tabs = {}
-        M.tabById = {}
-        M.holders = {}
+        M.tab = nil
+        M.canvas = nil
+        M.app = nil
     end
 
     return M
