@@ -122,6 +122,12 @@ local function messagesBody(opts)
 	})
 end
 
+-- A compaction request is identified by its brief, not by its output ceiling:
+-- the ceiling scales with how much history is being folded.
+local function isSummaryRequest(body)
+	return json.encode(body):find("Summarise the conversation excerpt", 1, true) ~= nil
+end
+
 local function toolCall(id, name, args)
 	-- These legacy provider scenarios exercise blocking delegation/report ordering.
 	-- Default background work is covered by the focused subagent coordination suites.
@@ -916,6 +922,114 @@ scenario("Messages caching counts cached tokens and survives a refusal", functio
 	session.send("again")
 	harness.settle(14)
 	check("a later turn sends no caching field", type(bodies[#bodies].system), "string")
+end)
+
+scenario("a small context window steps down to compact tool tiers", function()
+	local bodies = {}
+	local harness, handle = bootWith({
+		handler = function(entry)
+			if not entry.body then return { StatusCode = 404, Body = "{}" } end
+			local body = json.decode(entry.body)
+			if isSummaryRequest(body) then return { StatusCode = 200, Body = chatBody({ content = "GOAL: test" }) } end
+			bodies[#bodies + 1] = body
+			if #bodies == 1 then
+				return { StatusCode = 200, Body = chatBody({ toolCalls = { toolCall("load_1", "tools_load", { groups = { "coding" } }) } }) }
+			end
+			return { StatusCode = 200, Body = chatBody({ content = "done" }) }
+		end,
+	})
+	handle.config.set("permissions.mode", "full")
+	handle.config.set("agent.forceContext", { ["harness-model"] = 12000 })
+	local session = handle.sessions.current()
+	session.send("small window")
+	harness.settle(30)
+	check("two main requests were made", #bodies, 2)
+	local first = bodies[1]
+	local names = {}
+	for _, tool in ipairs(first.tools or {}) do names[tool["function"].name] = tool["function"] end
+	check("the essential tier is chosen for a 12k window", session.toolTier, 2)
+	truthy("essential tools stay", names.file_read and names.run_luau and names.instance_find)
+	truthy("the loader stays", names.tools_load)
+	check("a non-essential core tool is deferred", names.dispatch_agent, nil)
+	local overhead = #json.encode(first.tools) + #tostring(first.messages[1].content)
+	truthy("system plus tools leave most of the window", overhead / 4 < 12000 * 0.6, overhead)
+	local described = names.file_read and names.file_read.description or ""
+	truthy("descriptions are one sentence", not described:find("%.%s+%u"), described)
+	local systemText = tostring(first.messages[1].content)
+	check("group guidance leaves the system prompt", systemText:find("File and script projects:", 1, true), nil)
+	local loaderResult = ""
+	for _, message in ipairs(bodies[2].messages) do
+		if message.role == "tool" then loaderResult = tostring(message.content) end
+	end
+	contains("tools_load returns the coding guidance", loaderResult, "workspace_result_read")
+	local second = {}
+	for _, tool in ipairs(bodies[2].tools or {}) do second[tool["function"].name] = true end
+	truthy("the loaded group is offered", second.code_read or second.workspace_result_read)
+	check("no thread errors", #harness.errors(), 0)
+
+	-- A large window keeps the full tier.
+	handle.config.set("agent.forceContext", { ["harness-model"] = 400000 })
+	bodies = {}
+	session.send("big window")
+	harness.settle(30)
+	check("a large window keeps tier 0", session.toolTier, 0)
+end)
+
+scenario("compaction schemas keep property names and structure", function()
+	local _, handle = bootWith({ provider = false })
+	local registry = handle.env.require("agent/registry")
+	local out = registry.compactSchemaForTest({
+		type = "object", description = "drop me",
+		properties = { description = { type = "string", description = "a field named description" },
+			list = { type = "array", items = { type = "string", description = "x" } } },
+		required = { "description" },
+	})
+	check("top-level prose dropped", out.description, nil)
+	truthy("a property named description survives", out.properties.description)
+	check("its type stays", out.properties.description.type, "string")
+	check("its prose goes", out.properties.description.description, nil)
+	check("nested item prose goes", out.properties.list.items.description, nil)
+	check("required is untouched", out.required[1], "description")
+end)
+
+scenario("summaries scale with the window and use sections", function()
+	local _, handle = bootWith({ provider = false })
+	local ctxModule = handle.env.require("agent/context")
+	check("unknown window keeps the old cap", ctxModule.summaryCap(nil), 4096)
+	check("a small window keeps the floor", ctxModule.summaryCap(12000), 4096)
+	check("a 200k window gets about 8k tokens of room", ctxModule.summaryCap(200000), 16384)
+	check("summary input grows with the window", ctxModule.summaryInput(128000), 192000)
+	check("and is bounded", ctxModule.summaryInput(1000000), 240000)
+	local brief = handle.env.require("agent/prompt").compaction(900)
+	contains("the brief asks for sections", brief, "OPEN:")
+	contains("and keeps user refusals", brief, "USER:")
+	contains("with a scaled word budget", brief, "under 900 words")
+end)
+
+scenario("an oversized tool result is kept on disk with a preview", function()
+	local harness, handle = bootWith({ provider = false })
+	local ctxModule = handle.env.require("agent/context")
+	local big = ("line of output\n"):rep(4000)
+	local spilled = ctxModule.spill(big, "file_read", 400)
+	truthy("the preview is small", #spilled < 600, #spilled)
+	contains("it names the saved path", spilled, "saved to pastes/")
+	local path = spilled:match("saved to (pastes/%S-%.txt)")
+	truthy("a path is given", path, spilled)
+	local fsx = handle.env.require("runtime/fsx")
+	local stored = path and fsx.read((path:gsub("^pastes/", "")), { scope = "pastes" })
+	check("the full body is on disk", stored and #stored, #big)
+	check("a short result is untouched", ctxModule.spill("short", "x", 400), "short")
+	check("no thread errors", #harness.errors(), 0)
+end)
+
+scenario("skill reading can be narrowed to relevant skills", function()
+	local _, handle = bootWith({ provider = false })
+	local prompt = handle.env.require("agent/prompt")
+	contains("the default reads every skill", prompt.build({}), "read EVERY enabled skill")
+	handle.config.set("agent.skillsFirst", "relevant")
+	local text = prompt.build({})
+	contains("relevant mode reads matching skills", text, "read the relevant ones first")
+	check("and drops the every-skill rule", text:find("read EVERY enabled skill", 1, true), nil)
 end)
 
 -- 10. Loop safety ----------------------------------------------------------
@@ -2869,7 +2983,7 @@ scenario("context overflow recovers the same turn on both wire protocols", funct
 			model = "Relayed-Unknown", handler = function(entry)
 				if not entry.body then return { StatusCode = 404, Body = "{}" } end
 				local body = json.decode(entry.body)
-				if body.max_tokens == 512 then
+				if isSummaryRequest(body) then
 					summaries[#summaries + 1] = body
 					return { StatusCode = 200, Body = response("Keep the lighthouse; the dock is unfinished.") }
 				end
@@ -2908,7 +3022,7 @@ end)
 	local harness, handle = bootWith({ handler = function(entry)
 		if not entry.body then return { StatusCode = 404, Body = "{}" } end
 		local body = json.decode(entry.body)
-		if body.max_tokens == 512 then return { StatusCode = 200, Body = chatBody({ content = "Earlier facts" }) } end
+		if isSummaryRequest(body) then return { StatusCode = 200, Body = chatBody({ content = "Earlier facts" }) } end
 		attempts[body.model] = (attempts[body.model] or 0) + 1
 		if body.model == "fallback" then return { StatusCode = 200, Body = chatBody({ model = "fallback", content = "Fallback answered" }) } end
 		return { StatusCode = 400, Body = json.encode({ error = { message = "maximum context length is 12000 tokens" } }) }
@@ -2935,7 +3049,7 @@ scenario("context recovery learns and retries a smaller fallback model", functio
 	local harness, handle = bootWith({ handler = function(entry)
 		if not entry.body then return { StatusCode = 404, Body = "{}" } end
 		local body = json.decode(entry.body)
-		if body.max_tokens == 512 then return { StatusCode = 200, Body = chatBody({ content = "Remember the lighthouse" }) } end
+		if isSummaryRequest(body) then return { StatusCode = 200, Body = chatBody({ content = "Remember the lighthouse" }) } end
 		attempts[body.model] = (attempts[body.model] or 0) + 1
 		if body.model == "harness-model" then return { StatusCode = 401, Body = '{"error":"primary unavailable"}' } end
 		if attempts[body.model] == 1 then
@@ -2963,16 +3077,17 @@ end)
 
 scenario("context recovery stops on cancellation or uncompactable history", function()
 	for _, cancel in ipairs({ false, true }) do
-		local main, summaries, session = 0, 0, nil
+		local main, summaries, session, toolCounts = 0, 0, nil, {}
 		local harness, handle = bootWith({ handler = function(entry)
 			if not entry.body then return { StatusCode = 404, Body = "{}" } end
 			local body = json.decode(entry.body)
-			if body.max_tokens == 512 then
+			if isSummaryRequest(body) then
 				summaries = summaries + 1
 				session.abortFlag = true
 				return { StatusCode = 200, Body = chatBody({ content = "summary" }) }
 			end
 			main = main + 1
+			toolCounts[main] = #(body.tools or {})
 			return { StatusCode = 400, Body = '{"error":{"message":"maximum context length is 12000 tokens"}}' }
 		end })
 		session = handle.sessions.current()
@@ -2981,7 +3096,12 @@ scenario("context recovery stops on cancellation or uncompactable history", func
 		end
 		session.send("continue")
 		harness.settle(10)
-		check("no extra main request without a usable recovery", main, 1)
+		-- With no history to fold, the only usable recovery is fitting the fixed
+		-- overhead to the window the refusal named: one smaller retry, never more.
+		check("no extra main request without a usable recovery", main, cancel and 1 or 2)
+		if not cancel then
+			truthy("the one retry carries a smaller tool tier", (toolCounts[2] or 0) < (toolCounts[1] or 0))
+		end
 		check("only removable history triggers a summary", summaries, cancel and 1 or 0)
 		check("no thread errors", #harness.errors(), 0)
 	end

@@ -769,9 +769,10 @@ return function(env)
 				if not session then return { ok = false, text = "No conversation to load tools into." } end
 				local _, byGroup = registry.deferredCatalog({
 					groups = session.toolGroups, exclude = session.toolExclude, only = session.toolFilter,
+					tier = session.toolTier,
 				})
 				session.loadedGroups = session.loadedGroups or {}
-				local loaded, already, unknown = {}, {}, {}
+				local loaded, already, unknown, loadedNames = {}, {}, {}, {}
 				for _, raw in ipairs(type(args.groups) == "table" and args.groups or {}) do
 					local group = util.trim(tostring(raw)):lower()
 					local entry = byGroup[group]
@@ -783,12 +784,25 @@ return function(env)
 						session.loadGeneration = (session.loadGeneration or 0) + 1
 						session.loadedGroups[group] = session.loadGeneration
 						loaded[#loaded + 1] = group .. ": " .. table.concat(entry.names, ", ")
+						loadedNames[#loadedNames + 1] = group
 					end
 				end
 				local lines = {}
 				if #loaded > 0 then
 					lines[#lines + 1] = "Loaded. Full definitions are available from your next step."
 					for _, line in ipairs(loaded) do lines[#lines + 1] = "- " .. line end
+					-- In a compact tier the group-specific guidance is not in the system
+					-- prompt; it arrives with the tools it is about.
+					if (tonumber(session.toolTier) or 0) >= 1 then
+						local prompt = env.require("agent/prompt")
+						for _, group in ipairs(loadedNames) do
+							local guidance = prompt.groupGuidance(group)
+							if guidance then
+								lines[#lines + 1] = ""
+								lines[#lines + 1] = guidance
+							end
+						end
+					end
 				end
 				if #already > 0 then lines[#lines + 1] = "Already loaded: " .. table.concat(already, ", ") .. "." end
 				if #unknown > 0 then

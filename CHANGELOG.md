@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+Smaller, cache-friendly requests; small-context models work; layout fixes.
+
+- Load tool groups on demand. Core groups go with every request; the other twelve
+  are listed by `tools_load` and appended after it once loaded. A typical first
+  request drops from about 110 KB to 63 KB (158 tools / 88 KB of schemas to 70 /
+  40 KB). Calling a deferred tool by name loads its group. Setting: Load tools on demand.
+- Order the system prompt static-first and freeze the date per turn, so about 98%
+  of a request is a byte-stable prefix that provider caches can reuse.
+- Anthropic Messages prompt caching: breakpoints on the stable system block, the
+  last tool and the last user block. An endpoint that refuses `cache_control` is
+  retried once without it and remembered. Cache reads and writes are counted and
+  priced. Setting: Prompt caching.
+- Fit small context windows. When prompt and schemas would take more than 45% of a
+  known window, send compact schemas and then an essential tool set, with the rest
+  loadable; group guidance arrives with `tools_load`. A 12k-token model previously
+  failed before sending; it now completes with room for the conversation. Fixes the
+  nine failing context-recovery checks in `test/run.lua`.
+- Scale compaction summaries with the window (4-16 KiB, input 48-240 KB) and ask
+  for GOAL / DONE / FACTS / FAILED / OPEN / USER sections instead of 200 words.
+- Keep oversized tool results on disk: past the result cap or when trimmed to rescue
+  a request, the full text is saved under `UAI/pastes/` and the model sees a preview
+  with the path. Setting: Keep large results on disk.
+- Optional `agent.skillsFirst = "relevant"` (Settings > Skill reading) reads only
+  matching skills; the default keeps reading every enabled skill.
+- Split the provider chain and summariser into `agent/completion` and the repeat
+  and delegation guards into `agent/turnguard`; `agent/loop` keeps the turn itself.
+- Remotes: a compact touch layout no longer splits a 320px pane into a 128px list
+  that clips the Following control. Game changes: value previews keep two readable
+  lines in a short pane.
+
 ## 2.6.0 — October 4, 2026
 
 Reliable context, consistent game files, and theme controls.

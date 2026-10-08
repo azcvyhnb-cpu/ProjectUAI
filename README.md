@@ -755,6 +755,18 @@ conversation is still trimmed to fit. The composer shows a live context-window
 counter beside the model -- the share of that budget the next request is expected
 to spend -- so the pressure is visible before a compaction happens.
 
+Requests stay small and cache-friendly. **Load tools on demand** sends the core
+tool groups with every request and lets the agent load the rest with `tools_load`;
+the system prompt puts its static part first so providers can reuse a cached
+prefix, and **Prompt caching** marks that prefix for Anthropic Messages endpoints.
+On a model whose known window is small (8k-16k tokens), the client switches to
+compact tool schemas and an essential tool set so the conversation still fits.
+Summaries grow with the window and are written in sections (goal, done, facts,
+failed, open, user corrections). **Keep large results on disk** saves the full
+text of an oversized tool result under `UAI/pastes/` and gives the agent a
+preview with its path. **Skill reading** chooses between reading every enabled
+skill (default) and only the relevant ones.
+
 `check_luau` checks syntax without executing code. Both it and `run_luau` accept
 either inline `code` or a saved file `path`. Use `check_luau` with
 `{"path":"scripts/build.lua"}` to validate a script you edited, then run it by

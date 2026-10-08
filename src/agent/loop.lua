@@ -3,8 +3,9 @@
 -- Send the conversation, run whatever tools come back, repeat until the model
 -- answers in prose or a limit stops it. Everything around that -- provider
 -- failover, compaction, repeat detection, usage, the event stream -- is here
--- because it all has to interleave with the same loop, and splitting it would
--- mean threading state through five modules to achieve the same thing.
+-- because it all has to interleave with the same loop. The stateless parts live
+-- beside it: agent/completion (provider chain, summariser) and agent/turnguard
+-- (repeat signatures, delegation reminder).
 return function(env)
 	local util = env.require("runtime/util")
 	local config = env.require("runtime/config")
@@ -13,12 +14,13 @@ return function(env)
 	local prompt = env.require("agent/prompt")
 	local registry = env.require("agent/registry")
 	local usage = env.require("agent/usage")
-	local hooks = env.require("agent/hooks")
 	local providers = env.require("provider/registry")
-	local chat = env.require("provider/chat")
-	local stream = env.require("agent/stream")
 
 	local M = {}
+
+	-- Largest share of a known context window the system prompt and tool schemas
+	-- may take before the loop switches to a smaller tool tier.
+	local OVERHEAD_SHARE = 0.45
 
 	local function stopped(session)
 		session.emit("abort", {})
@@ -32,241 +34,11 @@ return function(env)
 		return text
 	end
 
-	local function argumentSignature(value, depth)
-		if type(value) ~= "table" then return util.encode(value) end
-		if (depth or 0) > 24 then return util.encode(value) end
-		local parts = {}
-		for _, key in ipairs(util.keys(value, true)) do
-			parts[#parts + 1] = type(key) .. ":" .. util.encode(key) .. ":" .. argumentSignature(value[key], (depth or 0) + 1)
-		end
-		return "{" .. table.concat(parts, ",") .. "}"
-	end
-
-	local function callSignature(calls)
-		local parts = {}
-		for _, call in ipairs(calls or {}) do
-			local fn = call["function"] or {}
-			local args = type(fn.arguments) == "table" and fn.arguments or util.decode(fn.arguments or "{}")
-			-- JSONDecode does not distinguish empty [] and {}. Keep the original
-			-- signature in that case rather than refusing a different operation.
-			local ambiguous = type(fn.arguments) == "string"
-				and (fn.arguments:find("%[%s*%]") or fn.arguments:find("{%s*}"))
-			parts[#parts + 1] = tostring(fn.name) .. "(" .. (args and not ambiguous and argumentSignature(args) or tostring(fn.arguments)) .. ")"
-		end
-		table.sort(parts)
-		return table.concat(parts, "|")
-	end
-
-	local function waitingForSubagents(calls)
-		if #calls == 0 then return false end
-		for _, call in ipairs(calls) do
-			local fn = call["function"] or {}
-			if fn.name ~= "agent_status" then return false end
-			local args = type(fn.arguments) == "table" and fn.arguments or util.decode(fn.arguments or "")
-			local seconds = type(args) == "table" and args.wait_seconds
-			if type(seconds) ~= "number" or seconds < 1 or seconds > 30 or seconds ~= math.floor(seconds) then return false end
-		end
-		return true
-	end
-
-	local function delegationReminder(session)
-		local children = env.loadedModules and env.loadedModules["agent/subagent"]
-		if not children then return nil end
-		local pending = children.pending(session)
-		if #pending == 0 then return nil end
-		local lines = { "[UAI delegation status] Internal update: " .. #pending .. " subagent task(s) still require coordination." }
-		for index = 1, math.min(24, #pending) do
-			local record = pending[index]
-			lines[#lines + 1] = tostring(record.id) .. ": " .. tostring(record.status)
-				.. ((record.status == "running" or record.status == "queued") and "" or " (report not collected)")
-		end
-		if #pending > 24 then lines[#lines + 1] = tostring(#pending - 24) .. " more; list them with agent_status." end
-		lines[#lines + 1] = "Continue your independent work and check subagents periodically with agent_status. "
-			.. "Use a bounded wait of 1-30 seconds only when no independent work remains. Read each finished report by exact ID "
-			.. "through its final page and incorporate it before the final answer. This is an internal coordination update, not a new user request."
-		return table.concat(lines, "\n")
-	end
-
-	-- One completion, walking the provider chain. Returns result, error, record.
-	--
-	-- A provider that fails is demoted by the registry and the next one is tried,
-	-- so a rate-limited primary does not end the turn. Only when every candidate
-	-- has failed does the turn fail, and the message names the first failure --
-	-- which is almost always the informative one.
-	local function complete(session, request, recoverContext)
-		local epoch = session.toolEpoch
-		local function aborted() return session.toolEpoch ~= epoch or session.aborted() end
-		local chain = providers.chain()
-		if #chain == 0 then
-			return nil, "No provider is configured. Open the Providers panel and add one."
-		end
-
-		local firstError
-		for index, record in ipairs(chain) do
-			if aborted() then return nil, "aborted" end
-			if index > 1 then
-				session.emit("provider:switch", {
-					from = chain[index - 1].label,
-					to = record.label,
-					reason = firstError,
-				})
-			end
-
-			local recovered = false
-			while true do
-				if aborted() then return nil, "aborted" end
-				local payload = { record = record, request = request, session = session }
-				hooks.run("preRequest", payload)
-				local accounting = session.ctx.observeRequest(payload.request.messages, payload.request.tools, record)
-				local maxTokens = payload.request.maxTokens or config.get("agent.maxTokens", 4096)
-				local outputCeiling
-				local window = env.require("provider/traits").contextWindow(record.model)
-				if window then
-					local available = math.floor(window - session.ctx.pressure(record))
-					-- A fallback can have a much smaller window than the provider whose
-					-- budget was checked before entering this chain. Give its removable
-					-- history the same one recovery opportunity as an API refusal.
-					if available < 1 and not recovered and recoverContext and recoverContext(record) then
-						recovered = true
-						if aborted() then return nil, "aborted" end
-						payload = { record = record, request = request, session = session }
-						hooks.run("preRequest", payload)
-						accounting = session.ctx.observeRequest(payload.request.messages, payload.request.tools, record)
-						maxTokens = payload.request.maxTokens or config.get("agent.maxTokens", 4096)
-						available = math.floor(window - session.ctx.pressure(record))
-					end
-					if available < 1 then
-						firstError = firstError or "The prepared prompt exceeds this model's context window even after compaction. "
-							.. "Use a larger-context model or reduce the enabled tools/standing instructions."
-						break
-					end
-					maxTokens = tonumber(maxTokens) or 4096
-					if maxTokens ~= maxTokens or maxTokens <= 0 or maxTokens == math.huge then maxTokens = 4096 end
-					local margin = math.min(1024, math.floor(window * 0.02))
-					outputCeiling = math.max(1, available - margin)
-					maxTokens = math.min(maxTokens, outputCeiling)
-				end
-				local preview = stream.new(session, record.model, aborted)
-
-				session.emit("request:start", {
-					streamId = preview.id,
-					provider = record.label,
-					providerId = record.id,
-					model = record.model,
-					attempt = index,
-					messages = #payload.request.messages,
-					stream = payload.request.stream,
-				})
-
-				local started = clock.ms()
-				local result, err, response = chat.complete(record, {
-					sessionId = not session.headless and session.id or nil, session = session,
-					messages = payload.request.messages,
-					tools = payload.request.tools,
-					toolChoice = payload.request.toolChoice,
-					stream = payload.request.stream,
-					temperature = payload.request.temperature,
-					maxTokens = maxTokens,
-					outputCeiling = outputCeiling,
-					extra = payload.request.extra,
-					aborted = aborted,
-					onRetry = function(info)
-						if aborted() then return end
-						session.emit("request:retry", {
-							provider = record.label,
-							attempt = info.attempt,
-							attempts = info.attempts,
-							wait = info.wait,
-							status = info.status,
-							reason = info.reason,
-						})
-					end,
-					onFrame = function(frame)
-						if aborted() then return end
-						preview.feed(frame)
-						if request.onFrame then request.onFrame(frame) end
-					end,
-				})
-				preview.close()
-
-				if aborted() then return nil, "aborted" end
-				if result then
-					session.emit("request:done", {
-						streamId = preview.id,
-						provider = record.label,
-						model = result.model or record.model,
-						ms = clock.since(started),
-						streamed = result.streamed,
-						via = result.via,
-					})
-					local after = { result = result, record = record, session = session }
-					hooks.run("postResponse", after)
-					if util.trim(after.result.model) == "" then after.result.model = record.model end
-					after.result.streamId = preview.id
-					return after.result, nil, record, accounting
-				end
-
-				session.emit("request:done", {
-					streamId = preview.id,
-					provider = record.label,
-					model = record.model,
-					ms = clock.since(started),
-					error = err,
-				})
-				if err == "aborted" or session.aborted() then return nil, "aborted" end
-				if (response and response.terminal) or env.require("net/http").terminal(err) then return nil, err end
-				-- Recover against the provider that actually refused the prompt, before
-				-- failover. A smaller fallback model can have a different window.
-				if recovered or not chat.contextOverflow(err) or not recoverContext or not recoverContext(record) then
-					firstError = firstError or err
-					break
-				end
-				recovered = true
-			end
-		end
-
-		return nil, firstError or "every provider failed"
-	end
-
-	-- Compaction uses whatever provider is healthy, with no tools and a tight
-	-- ceiling. Account for its cost separately without teaching the main context
-	-- estimator that this small, tool-free prompt was the conversation request.
-	local function summariser(session, preferredRecord)
-		return function(transcript, maxBytes)
-			local epoch = session.toolEpoch
-			local record = preferredRecord or providers.active()
-			if not record then return nil end
-			local messages = {
-				{ role = "system", content = prompt.compaction() },
-				{ role = "user", content = transcript },
-			}
-			local maxTokens = math.min(512, math.max(16, math.floor((maxBytes or 2048) / 4)))
-			local window = env.require("provider/traits").contextWindow(record.model)
-			if window then
-				local available = math.floor(window - usage.estimateMessages(messages) - 64)
-				if available < 16 then return nil end
-				maxTokens = math.min(maxTokens, available)
-			end
-			session.emit("status", { text = "Compacting context" })
-			local result = chat.complete(record, { session = session,
-				messages = messages,
-				temperature = 0,
-				maxTokens = maxTokens,
-				outputCeiling = maxTokens,
-				attempts = 1,
-				aborted = function() return session.toolEpoch ~= epoch or session.aborted() end,
-			})
-			if session.toolEpoch ~= epoch or session.aborted() then return nil end
-			if result then
-				usage.record(result.usage, result.model or record.model, {
-					prompt = usage.estimateMessages(messages),
-					completion = usage.estimateText(result.content) + usage.estimateText(result.reasoning),
-				}, record)
-				session.emit("usage", { session = usage.session, turn = usage.turn })
-			end
-			return result and result.finish ~= "length" and result.content or nil
-		end
-	end
+	local guard = env.require("agent/turnguard")
+	local argumentSignature, callSignature = guard.argumentSignature, guard.callSignature
+	local waitingForSubagents, delegationReminder = guard.waitingForSubagents, guard.delegationReminder
+	local completion = env.require("agent/completion")
+	local complete, summariser = completion.complete, completion.summariser
 
 	-- Runs one user prompt to completion. Returns the assistant's final text.
 	function M.run(session, text, images)
@@ -327,24 +99,6 @@ return function(env)
 			session.emit("status", { text = turn == 1 and "Thinking" or ("Working (step " .. turn .. ")") })
 
 			local record = providers.active()
-			-- A session may carry its own brief. A subagent does: it answers to the
-			-- parent agent rather than to the user, so inheriting the main prompt
-			-- would have it write a chat reply instead of a report.
-			local systemText, cachePrefix
-			if type(session.systemPrompt) == "function" then
-				systemText, cachePrefix = session.systemPrompt({ date = turnDate })
-			elseif type(session.systemPrompt) == "string" and util.trim(session.systemPrompt) ~= "" then
-				systemText = session.systemPrompt
-			else
-				systemText, cachePrefix = prompt.buildWithPrefix({
-					date = turnDate,
-					model = record and record.model or nil,
-					provider = record and record.label or nil,
-					-- Which conversation this is for. The task list rides on the session,
-					-- so a prompt built without it is built without the plan.
-					session = session,
-				})
-			end
 
 			-- A conversation the user has named keeps that name: the rename tool is
 			-- absent from its catalogue rather than described and refused, the same
@@ -355,15 +109,62 @@ return function(env)
 				exclude = util.copy(exclude or {})
 				exclude.conversation_rename = true
 			end
-			local request = {
-				messages = ctx.wire(systemText, cachePrefix),
-				tools = registry.definitions({
+
+			-- System prompt and tool list for one record at one size tier. A session
+			-- may carry its own brief. A subagent does: it answers to the parent agent
+			-- rather than to the user, so inheriting the main prompt would have it
+			-- write a chat reply instead of a report.
+			local function build(target, tier)
+				local text, prefix
+				if type(session.systemPrompt) == "function" then
+					text, prefix = session.systemPrompt({ date = turnDate, tier = tier })
+				elseif type(session.systemPrompt) == "string" and util.trim(session.systemPrompt) ~= "" then
+					text = session.systemPrompt
+				else
+					text, prefix = prompt.buildWithPrefix({
+						date = turnDate,
+						tier = tier,
+						model = target and target.model or nil,
+						provider = target and target.label or nil,
+						-- Which conversation this is for. The task list rides on the session,
+						-- so a prompt built without it is built without the plan.
+						session = session,
+					})
+				end
+				local tools = registry.definitions({
 					only = session.toolFilter,
 					groups = session.toolGroups,
 					exclude = exclude,
 					lazy = true,
 					loaded = session.loadedGroups,
-				}),
+					tier = tier,
+				})
+				return text, prefix, tools
+			end
+
+			-- Fixed overhead has to leave room for the conversation. When the prompt
+			-- and schemas alone would take more than OVERHEAD_SHARE of a known window,
+			-- step down to compact schemas, then to the essential tool set. The choice
+			-- is a pure function of the window and the loaded groups, so it is stable
+			-- from step to step and does not churn the provider's cache.
+			local function prepare(target)
+				local window = target and env.require("provider/traits").contextWindow(target.model)
+				local tier, text, prefix, tools = 0
+				while true do
+					text, prefix, tools = build(target, tier)
+					if not window or tier >= 2 or config.get("agent.lazyTools", true) == false then break end
+					local overhead = usage.estimateText(text) + usage.estimateText(util.encode(tools))
+					if overhead <= window * OVERHEAD_SHARE then break end
+					tier = tier + 1
+				end
+				session.toolTier = tier
+				return text, prefix, tools
+			end
+
+			local systemText, cachePrefix, tools = prepare(record)
+			local request = {
+				messages = ctx.wire(systemText, cachePrefix),
+				tools = tools,
 				stream = session.stream,
 				onFrame = session.onFrame,
 			}
@@ -382,10 +183,16 @@ return function(env)
 				if session.aborted() then return false end
 				local prior = ctx.tokens()
 				local recoverSummary = config.get("agent.compaction", true) ~= false and summariser(session, refusedRecord) or nil
+				-- The refusal may have just taught a smaller window. Re-fit the fixed
+				-- overhead to it before folding history against what is left.
+				local tierBefore = session.toolTier
+				systemText, cachePrefix, request.tools = prepare(refusedRecord)
+				request.messages = ctx.wire(systemText, cachePrefix)
+				ctx.observeRequest(request.messages, request.tools, refusedRecord)
 				local folded = ctx.compact(recoverSummary, { model = refusedRecord.model, record = refusedRecord,
 					force = true, aborted = compactionAborted })
-				if not folded then return false end
-				session.emit("compact", { summary = folded, before = prior, after = ctx.tokens() })
+				if not folded and session.toolTier == tierBefore then return false end
+				if folded then session.emit("compact", { summary = folded, before = prior, after = ctx.tokens() }) end
 				request.messages = ctx.wire(systemText, cachePrefix)
 				return true
 			end)
@@ -466,7 +273,7 @@ return function(env)
 						-- A deferred tool called by name (the prompt mentions several)
 						-- still runs; its group is promoted so the next step carries the
 						-- schema it was missing.
-						if tool and registry.isDeferred(tool.group) then
+						if tool and registry.deferredFor(tool, session.toolTier) then
 							session.loadedGroups = session.loadedGroups or {}
 							if not session.loadedGroups[tool.group] then
 								session.loadGeneration = (session.loadGeneration or 0) + 1

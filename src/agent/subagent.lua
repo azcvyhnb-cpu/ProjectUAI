@@ -758,6 +758,7 @@ return function(env)
 		child.systemPrompt = function(build)
 			return prompt.subagentWithPrefix(task_text, {
 				date = type(build) == "table" and build.date or nil,
+				tier = type(build) == "table" and build.tier or nil,
 				extra = (opts.extra or "") .. "\nNative workspace references are shared with the user. Respect this subagent's tool scope; never use a controller or generated script to bypass a denied native action.",
 				unlimited = M.unlimited(),
 			})

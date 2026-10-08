@@ -254,7 +254,9 @@ takes a typed id, and saving requires one.
 Rolling compaction feeds the previous summary back to the summarizer with newly
 removed turns and complete older assistant/tool exchanges from long turns. It
 retains recent user requests and the latest two exchanges, bounds merged summaries
-to 4 KiB, reserves summary headroom, and replaces history only after checking for
+to four percent of a known model window (between 4 KiB and 16 KiB; 4 KiB when the
+window is unknown), reads up to 1.5 bytes of folded history per window token
+(48-240 KB), asks for GOAL/DONE/FACTS/FAILED/OPEN/USER sections, reserves summary headroom, and replaces history only after checking for
 context reduction and cancellation. Summary input includes bounded tool arguments,
 paths, results and continuation offsets. Automatic failed/disabled summaries use
 explicitly labelled bounded excerpts; manual compaction requires a successful
@@ -285,6 +287,23 @@ Generation settings live in `runtime/config` and are persisted in `UAI/config.js
 | --- | --- | --- |
 | `agent.maxTokens` | 128000 | Saved reply limit; model limits and learned per-model caps apply when constructing requests. |
 | `agent.contextTokens` | 1000000 | Context budget before compaction. Larger contexts spend more of an executor's request window on upload and prefill. |
+
+| `agent.lazyTools` | true | Send core groups with every request; deferred groups are described by `tools_load` and appended after it when loaded. |
+| `agent.promptCache` | true | Anthropic Messages requests mark the stable system prefix, last tool and last user block with `cache_control`; a refusing endpoint is remembered per record. |
+| `agent.spillResults` | true | Tool results past the result cap, and old results trimmed to rescue a request, keep their full text in `UAI/pastes/` and show a preview naming the path. |
+| `agent.skillsFirst` | `"all"` | `"all"` keeps the read-every-skill contract below; `"relevant"` reads only skills whose description matches the request. |
+
+### Tool tiers for small windows
+
+When a model's window is known and the system prompt plus tool schemas would take
+more than 45% of it, the loop steps down: tier 1 sends compact schemas (the first
+sentence of each description, no per-parameter prose) and moves the Code
+workspace, script project and UI LIB sections out of the system prompt into the
+`tools_load` result for `coding` and `gui`; tier 2 also narrows the core list to
+an essential set (file, Luau, instance, web, todo, ask, skills read, game info),
+with every other tool loadable. The choice depends only on the window and loaded
+groups. A context refusal that teaches a smaller window re-fits the tier before
+compaction, and that one smaller retry counts as the record's single recovery.
 
 ## 5. Tool contract
 
@@ -384,7 +403,9 @@ an error result for every call without executing any, allowing the model to send
 smaller complete calls on its next step.
 
 Main and subagent prompts require reading every enabled skill before replying or
-performing other work in each new or resumed conversation. The environment supplies
+performing other work in each new or resumed conversation. With `agent.skillsFirst`
+set to `"relevant"`, they read every skill whose name or description could apply
+and skip ones that clearly do not. The environment supplies
 names, filenames and descriptions; `skills_read` supplies the body. Both skill
 bodies and `skills_list` paginate through UTF-8-safe byte offsets within the result
 budget. Restricted subagent presets include the skills group and explicitly exclude

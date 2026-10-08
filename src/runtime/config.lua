@@ -109,6 +109,12 @@ return function(env)
 			-- Explicit cache breakpoints on Messages-API requests. Chat-completions
 			-- providers cache stable prefixes automatically and need no field.
 			promptCache = true,
+			-- Oversized tool results keep their full text in UAI/pastes/ and the
+			-- model sees a preview with the path, instead of losing the rest.
+			spillResults = true,
+			-- "all" reads every enabled skill body at the start of each conversation
+			-- (the documented contract); "relevant" reads only matching ones.
+			skillsFirst = "all",
 			stream = true,
 			temperature = 0.4,
 			-- Reasoning depth: sent as `reasoning_effort` on chat completions and as

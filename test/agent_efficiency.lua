@@ -138,8 +138,10 @@ case("compaction sends smaller history and accounts for its own request", functi
 	end
 	local before = session.ctx.tokens()
 	f.run(function() return f.env.require("agent/loop").run(session, "Continue repairing the boat") end)
-	check("one bounded summary request precedes the main request", summaryRequest and mainRequest and summaryRequest.maxTokens <= 512
-		and summaryRequest.outputCeiling == summaryRequest.maxTokens)
+	-- The summary ceiling scales with the room the context leaves (a fifth of the
+	-- message budget, at most 4096 tokens), not a fixed 512.
+	check("one bounded summary request precedes the main request", summaryRequest and mainRequest and summaryRequest.maxTokens <= 3000 * 0.25
+		and summaryRequest.maxTokens <= 4096 and summaryRequest.outputCeiling == summaryRequest.maxTokens)
 	check("the main request has the merged note and reduced context", has(mainRequest.messages[2].content, "preserve the dock")
 		and f.env.require("agent/usage").estimateMessages(mainRequest.messages) < before * 0.5)
 	local usage = f.env.require("agent/usage")

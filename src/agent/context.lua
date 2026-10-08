@@ -17,6 +17,41 @@ return function(env)
 	local M = {}
 	local SUMMARY_BYTES = 4096
 	local SUMMARY_INPUT_BYTES = 48000
+	-- The summary ceiling scales with the window: four percent of it, between the
+	-- old fixed 4 KiB and 16 KiB. A 200k-token model keeps a ~4k-token summary of a
+	-- long tool loop instead of 1k; a small model keeps the old bound.
+	local function summaryCap(window)
+		if not window then return SUMMARY_BYTES end
+		return math.max(SUMMARY_BYTES, math.min(16384, math.floor(window * 0.04) * 4))
+	end
+	-- How much folded history the summariser may read, in bytes.
+	local function summaryInput(window)
+		if not window then return SUMMARY_INPUT_BYTES end
+		return math.max(SUMMARY_INPUT_BYTES, math.min(240000, math.floor(window * 1.5)))
+	end
+	M.summaryCap, M.summaryInput = summaryCap, summaryInput
+
+	-- Shrinks a tool result to `limit` bytes of preview while keeping the whole
+	-- text reachable: the full body is saved through the attachment store (the
+	-- same verified UAI/pastes/ files file_read already accepts) and the preview
+	-- names its path. Without file storage it falls back to a plain cut.
+	function M.spill(content, name, limit)
+		content = tostring(content or "")
+		limit = math.max(120, math.floor(tonumber(limit) or 400))
+		if #content <= limit then return content end
+		local okModule, attachments = pcall(env.require, "runtime/attachments")
+		local entry
+		if okModule and type(attachments) == "table" and type(attachments.save) == "function" then
+			local label = tostring(name or "tool"):gsub("[^%w_%-]", "_")
+			local okSave, saved = pcall(attachments.save, content, "result-" .. label .. ".txt")
+			if okSave and type(saved) == "table" and saved.path then entry = saved end
+		end
+		if not entry then return util.truncate(content, limit, "trimmed to fit the context budget") end
+		local note = string.format("\n[Full result (%d bytes, %d lines) saved to %s. Read the rest with file_read offsets or file_search.]",
+			entry.bytes, entry.lines, entry.path)
+		local preview = util.truncate(content, math.max(60, limit - #note), "preview")
+		return preview .. note
+	end
 	-- Keep both ends, including verdicts/cursors and late user corrections. The
 	-- public truncate helper includes its own notice outside the requested size.
 	local function excerpt(value, limit)
@@ -242,7 +277,7 @@ return function(env)
 			if not force and ctx.tokens() > limit then
 				for _, message in ipairs(ctx.messages) do
 					if message.role == "tool" and #tostring(message.content) > 400 then
-						message.content = util.truncate(message.content, 400, "trimmed to fit the context budget")
+						message.content = M.spill(message.content, message.name, 400)
 						if ctx.tokens() <= limit then break end
 					end
 				end
@@ -269,7 +304,9 @@ return function(env)
 			local original, originalSummary = ctx.messages, ctx.summary
 			local count = #original
 			local dropped, keptTokens = {}, usage.estimateMessages(original)
-			local reserve = math.min(SUMMARY_BYTES / 4, math.max(64, math.floor(msgLimit * 0.2)))
+			local window = opts.model and env.require("provider/traits").contextWindow(opts.model)
+			local cap = summaryCap(window)
+			local reserve = math.min(cap / 4, math.max(64, math.floor(msgLimit * 0.2)))
 			local target = math.max(0, math.floor(msgLimit * 0.75))
 			local function needsSpace() return force or keptTokens + reserve > target end
 			local function remove(first, last)
@@ -309,15 +346,14 @@ return function(env)
 			if #removed == 0 then return nil, "no older complete exchanges to fold" end
 			-- A replacement must make a real saving even if the provider ignores its
 			-- output ceiling. Reserve space for it before selecting history to fold.
-			local summaryBytes = math.min(SUMMARY_BYTES, reserve * 4, math.floor((before - keptTokens) * 4 * 0.75))
+			local summaryBytes = math.min(cap, reserve * 4, math.floor((before - keptTokens) * 4 * 0.75))
 			if summaryBytes < 64 then return nil, "too little older context to compact usefully" end
-			local inputLimit = SUMMARY_INPUT_BYTES
-			local window = opts.model and env.require("provider/traits").contextWindow(opts.model)
+			local inputLimit = summaryInput(window)
 			if window then inputLimit = math.min(inputLimit, math.max(1000, (window - 1536) * 3)) end
 			local transcript, entries, size = {}, {}, 0
 			local previousSummary = ctx.summary and util.trim(ctx.summary) or ""
 			if previousSummary ~= "" then
-				transcript[#transcript + 1] = "Summary so far:\n" .. excerpt(previousSummary, math.min(SUMMARY_BYTES, math.floor(inputLimit / 3)))
+				transcript[#transcript + 1] = "Summary so far:\n" .. excerpt(previousSummary, math.min(cap, math.floor(inputLimit / 3)))
 				transcript[#transcript + 1] = "\nNewer messages to fold into that summary:"
 			end
 			for index = #kept, 1, -1 do

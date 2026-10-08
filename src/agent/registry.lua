@@ -219,6 +219,60 @@ return function(env)
 		return DEFERRED[tostring(group)] == true and config.get("agent.lazyTools", true) ~= false
 	end
 
+	-- Small context windows. The full core list plus the system prompt is around
+	-- 15k tokens, which leaves nothing for the conversation on an 8k-16k model.
+	-- Tier 1 keeps the core list but sends compact schemas: first sentence of each
+	-- description, no per-parameter prose. Tier 2 also narrows the core to the
+	-- essentials below; every other tool becomes loadable through tools_load.
+	local ESSENTIAL = {
+		file_list = true, file_read = true, file_search = true, file_edit = true, file_write = true, file_append = true,
+		run_luau = true, check_luau = true, script_source = true,
+		instance_tree = true, instance_find = true, instance_get = true, instance_set = true, instance_query = true,
+		web_search = true, web_read = true, todo_write = true, ask_user = true, skills_read = true, game_info = true,
+	}
+	M.ESSENTIAL = ESSENTIAL
+
+	local function deferredIn(tool, tier)
+		if (tonumber(tier) or 0) >= 2 then
+			return not ESSENTIAL[tool.name] and config.get("agent.lazyTools", true) ~= false
+		end
+		return M.isDeferred(tool.group)
+	end
+
+	local function firstSentence(text)
+		text = tostring(text or "")
+		local sentence = text:match("^(.-[%.%?!])%s") or text
+		if #sentence > 220 then sentence = util.ellipsis(sentence, 220) end
+		return sentence
+	end
+
+	-- Drops descriptive prose from a schema while keeping every structural keyword.
+	-- `properties` is a name map, so its keys are never treated as keywords.
+	local function compactSchema(node, depth)
+		depth = (depth or 0) + 1
+		if type(node) ~= "table" or depth > 32 or util.isEmptyObject(node) then return node end
+		local out = {}
+		for key, value in pairs(node) do
+			if key == "description" or key == "examples" or key == "title" then
+				-- omitted
+			elseif key == "properties" and type(value) == "table" and not util.isArray(value) then
+				local props = {}
+				for name, child in pairs(value) do props[name] = compactSchema(child, depth) end
+				out[key] = util.count(props) == 0 and util.emptyObject() or props
+			elseif type(value) == "table" and key ~= "required" and key ~= "enum" then
+				out[key] = compactSchema(value, depth)
+			else
+				out[key] = value
+			end
+		end
+		return out
+	end
+	M.compactSchemaForTest = compactSchema
+
+	function M.deferredFor(tool, tier)
+		return type(tool) == "table" and tool.lazyOnly ~= true and deferredIn(tool, tier) or false
+	end
+
 	local function offered(tool, opts, readonly)
 		if M.missingCapability(tool) then return false end
 		if readonly and tool.risk ~= "read" then return false end
@@ -239,7 +293,7 @@ return function(env)
 		local byGroup, order = {}, {}
 		for _, name in ipairs(M.order) do
 			local tool = M.tools[name]
-			if M.isDeferred(tool.group) and offered(tool, opts, readonly) then
+			if tool.lazyOnly ~= true and deferredIn(tool, opts.tier) and offered(tool, opts, readonly) then
 				local entry = byGroup[tool.group]
 				if not entry then
 					entry = { group = tool.group, label = M.groupLabel(tool.group), names = {} }
@@ -259,18 +313,21 @@ return function(env)
 		local lazy = opts.lazy == true and opts.only == nil and config.get("agent.lazyTools", true) ~= false
 		local loaded = opts.loaded or {}
 		local out, later = {}, {}
+		local compact = lazy and (tonumber(opts.tier) or 0) >= 1
 		local function definition(tool)
 			local description = tool.description
 			if type(tool.describe) == "function" then
 				local ok, value = pcall(tool.describe, opts)
 				if ok and type(value) == "string" then description = value end
+			elseif compact then
+				description = firstSentence(description)
 			end
 			return {
 				type = "function",
 				["function"] = {
 					name = tool.name,
 					description = description,
-					parameters = normaliseSchema(tool.parameters),
+					parameters = normaliseSchema(compact and compactSchema(tool.parameters) or tool.parameters),
 				},
 			}
 		end
@@ -279,7 +336,7 @@ return function(env)
 			for _, name in ipairs(M.order) do
 				local tool = M.tools[name]
 				if tool.lazyOnly ~= true and offered(tool, opts, readonly) then
-					if M.isDeferred(tool.group) then
+					if deferredIn(tool, opts.tier) then
 						hasDeferred = true
 						if loaded[tool.group] then
 							later[#later + 1] = { tool = tool, seq = tonumber(loaded[tool.group]) or 0, reg = registrations[name] or 0 }
@@ -541,6 +598,13 @@ return function(env)
 
 		local cap = config.get("agent.resultCap", 4000)
 		local capped, truncated = util.truncate(text, cap, "ask for a narrower slice if you need the rest")
+		-- Past the cap, keep the rest on disk instead of discarding it, and say where.
+		if truncated and type(text) == "string" and config.get("agent.spillResults", true) ~= false then
+			local okSpill, spilled = pcall(function()
+				return env.require("agent/context").spill(text, name, cap)
+			end)
+			if okSpill and type(spilled) == "string" and spilled:find("saved to ", 1, true) then capped = spilled end
+		end
 		result.ok = handlerOk
 		if not handlerOk then result.error = "tool reported a failure" end
 		result.text = capped

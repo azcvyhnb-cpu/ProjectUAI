@@ -1219,6 +1219,17 @@ return function(env)
 			path = "agent.promptCache",
 		})
 		R.toggle(agent, {
+			label = "Keep large results on disk",
+			hint = "When a tool result is too long for the context, save the full text under UAI/pastes/ and give the agent a preview with the path.",
+			path = "agent.spillResults",
+		})
+		R.choice(agent, "Skill reading",
+			"Which enabled skills the agent reads before its first reply in a conversation.",
+			"agent.skillsFirst",
+			{ "all", "relevant" },
+			{ "Every skill", "Relevant only" },
+			{ "Thorough", "Faster" })
+		R.toggle(agent, {
 			label = "Provider fallback",
 			hint = "Try the next enabled provider when one fails.",
 			path = "agent.fallback",
