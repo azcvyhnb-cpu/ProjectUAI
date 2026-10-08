@@ -30,7 +30,7 @@ jobs:
         run: luajit tools/bundle.lua --native
 
       - name: Verify bundle
-        run: luajit tools/bundle.lua --check
+        run: luajit tools/bundle.lua --native --check
 
       - name: Commit generated dist
         run: |
