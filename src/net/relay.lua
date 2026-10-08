@@ -10,7 +10,7 @@ return function(env)
 	function M.request(spec, headers, call)
 		local base = "http://127.0.0.1:" .. tostring(config.get("bridge.port", 8790))
 		local token = tostring(config.get("bridge.token", ""))
-		local timeout = util.clamp(tonumber(config.get("bridge.requestTimeout", 180)) or 180, 10, 86400)
+		local timeout = util.clamp(tonumber(config.get("bridge.requestTimeout", 1800)) or 180, 10, 86400)
 		local id = "inference_" .. env.services.HttpService:GenerateGUID(false)
 		local deadline = clock.ms() + (timeout + 30) * 1000
 		local function short(method, path, body)
