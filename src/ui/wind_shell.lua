@@ -16,6 +16,7 @@ return function(env)
     }
 
     local PANELS = {
+        { id = "conversations", label = "Conversations", icon = "messages-square" },
         { id = "chat", label = "Chat", icon = "message-circle" },
         { id = "cowork", label = "Cowork", icon = "terminal" },
         { id = "code", label = "Code", icon = "code" },
@@ -180,11 +181,23 @@ return function(env)
             M.panelHosts[entry.id] = canvas
         end
 
+        -- The conversation/history surface is the one legacy UI surface that
+        -- cannot be reduced to a panel builder: it owns history rows, folders,
+        -- profile actions and thread management. Mount it as a real WindUI tab
+        -- instead of throwing those capabilities away.
+        local conversationHost = M.panelHosts.conversations
+        if conversationHost and M.app then
+            M.app.sidebar = env.require("ui/sidebar").new(conversationHost, M.app)
+        end
+
         if M.window.native.TabModule then
             M.window.native.TabModule:OnChange(function(index)
                 local id = M.panelByIndex[index]
                 if not id or M.selecting then return end
                 M.activePanel = id
+                if id == "conversations" then
+                    return
+                end
                 if M.app then
                     M.app.showPanel(id)
                 end
@@ -248,9 +261,17 @@ return function(env)
         if M.tabs[id] then M.selectPanel(id) end
     end
 
+    function M.toggleSidebar()
+        if not M.window or not M.window.native then return end
+        local side = M.window.native.UIElements and M.window.native.UIElements.SideBar
+        if side then
+            side.Visible = not side.Visible
+        end
+    end
+
     function M.show(id)
         if not M.window then M.mount(M.app) end
-        if id then M.selectPanel(id) end
+        if id and M.tabs[id] then M.selectPanel(id) end
         M.window.show()
         return M
     end
