@@ -147,11 +147,11 @@ return function(env)
 			-- subagent's own batch is bounded separately, and two levels of that
 			-- multiply rather than add.
 			subagentConcurrency = 12,
-			-- Seconds one subagent may run for. The tool that dispatches it derives its
+			-- Seconds one subagent may run for. Keep the child inference budget aligned with the 30-minute model ceiling. The tool that dispatches it derives its
 			-- own timeout from this, so the two cannot drift apart -- when they did, the
 			-- generic 25s tool timeout fired first and every finished report was thrown
 			-- away by a caller that had already given up.
-			subagentBudget = 900,
+			subagentBudget = 1800,
 			-- Lifts every clock and counter on a dispatched subagent: no step limit, no
 			-- wall-clock budget, and the call that dispatched it waits as long as the
 			-- child takes rather than abandoning a report nobody is left to collect.
