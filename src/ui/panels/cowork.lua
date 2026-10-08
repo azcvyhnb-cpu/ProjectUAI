@@ -201,9 +201,9 @@ return function(env)
 				local ok, err = pcall(env.require("net/bridge_commands").run, { type = "runtime", value = value })
 				if not ok then overlay.toast(tostring(err), "warn", 3) end
 			end })
-		P.field(runtimeCard, { name = "BridgeRequestTimeout", text = tostring(config.get("bridge.requestTimeout", 180)),
+		P.field(runtimeCard, { name = "BridgeRequestTimeout", text = tostring(config.get("bridge.requestTimeout", 1800)),
 			placeholder = "Provider timeout in seconds", layoutOrder = 4, onBlur = function(value)
-				config.set("bridge.requestTimeout", util.clamp(tonumber(value) or 180, 10, 86400))
+				config.set("bridge.requestTimeout", util.clamp(tonumber(value) or 1800, 10, 86400))
 			end })
 		P.text(settings, { text = "Port", role = "small", layoutOrder = 1 })
 		P.field(settings, {
