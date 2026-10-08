@@ -116,7 +116,7 @@ return function(env)
         -- discarded: app.buildBody() below still creates the complete UAI sidebar,
         -- conversation list and all existing panels inside the WindUI content area.
 
-        w:Topbar.Button({
+        w.Topbar:Button({
             Name = "New conversation",
             Icon = "plus",
             LayoutOrder = 1,
@@ -125,7 +125,7 @@ return function(env)
             end),
         })
 
-        w:Topbar.Button({
+        w.Topbar:Button({
             Name = "Search conversations",
             Icon = "search",
             LayoutOrder = 2,
@@ -134,7 +134,7 @@ return function(env)
             end),
         })
 
-        w:Topbar.Button({
+        w.Topbar:Button({
             Name = "Folders",
             Icon = "folder",
             LayoutOrder = 3,
@@ -143,7 +143,7 @@ return function(env)
             end),
         })
 
-        w:Topbar.Button({
+        w.Topbar:Button({
             Name = "Back",
             Icon = "arrow-left",
             LayoutOrder = 4,
@@ -152,7 +152,7 @@ return function(env)
             end),
         })
 
-        w:Topbar.Button({
+        w.Topbar:Button({
             Name = "Forward",
             Icon = "arrow-right",
             LayoutOrder = 5,
@@ -161,7 +161,7 @@ return function(env)
             end),
         })
 
-        w:Topbar.Button({
+        w.Topbar:Button({
             Name = "More",
             Icon = "ellipsis",
             LayoutOrder = 6,
