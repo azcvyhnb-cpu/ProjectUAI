@@ -1,19 +1,29 @@
 -- WindUI presentation adapter for Project UAI.
--- IMPORTANT: this is deliberately a compatibility shell. It keeps the complete
--- Project UAI application surface (sidebar, conversations, chat, code, agents,
--- providers, tools, settings, logs, dialogs and session wiring) and changes only
--- the outer window/chrome to WindUI.
+-- The UAI feature layer is preserved. WindUI supplies the navigation/chrome and
+-- each original UAI panel is mounted into a real WindUI tab.
 return function(env)
     local WindUI = env.require("ui/windui")
     local config = env.require("runtime/config")
-    local sessions = env.require("agent/session")
 
     local M = {
         app = nil,
         window = nil,
-        tab = nil,
-        canvas = nil,
+        tabs = {},
+        panelHosts = {},
+        panelByIndex = {},
+        activePanel = "chat",
         selecting = false,
+    }
+
+    local PANELS = {
+        { id = "chat", label = "Chat", icon = "message-circle" },
+        { id = "cowork", label = "Cowork", icon = "terminal" },
+        { id = "code", label = "Code", icon = "code" },
+        { id = "agents", label = "Subagents", icon = "users" },
+        { id = "providers", label = "Providers", icon = "sliders-horizontal" },
+        { id = "tools", label = "Tools", icon = "wrench" },
+        { id = "settings", label = "Settings", icon = "settings" },
+        { id = "logs", label = "Logs", icon = "file-text" },
     }
 
     local function safe(callback)
@@ -26,85 +36,31 @@ return function(env)
         end
     end
 
-    local function showPanel(app, id)
-        if not app then return end
-        app.show(id)
-    end
-
-    local function openUtilityDialog(title, buttons)
+    local function buildMoreDialog(app)
         if not M.window or not M.window.native then return end
         return M.window.native:Dialog({
-            Title = title,
+            Title = "Project UAI",
             Width = 430,
-            Buttons = buttons,
-        })
-    end
-
-    local function buildMoreDialog(app)
-        return openUtilityDialog("Project UAI", {
-            {
-                Title = "Settings",
-                Icon = "settings",
-                Callback = safe(function()
-                    app.showSettingsDialog("general")
-                end),
-            },
-            {
-                Title = "Providers & models",
-                Icon = "sliders-horizontal",
-                Callback = safe(function()
-                    app.show("providers")
-                end),
-            },
-            {
-                Title = "What's new",
-                Icon = "sparkles",
-                Callback = safe(function()
-                    app.showChangelog()
-                end),
-            },
-            {
-                Title = "ProjectUAI",
-                Icon = "book-open",
-                Callback = safe(function()
-                    env.require("ui/project").open()
-                end),
-            },
-            {
-                Title = "About this build",
-                Icon = "info",
-                Callback = safe(function()
-                    app.showAbout()
-                end),
-            },
-            {
-                Title = "Join Discord",
-                Icon = "globe",
-                Callback = safe(function()
-                    app.joinDiscord()
-                end),
-            },
-            {
-                Title = "Donate",
-                Icon = "heart",
-                Callback = safe(function()
-                    app.donate()
-                end),
-            },
-            {
-                Title = "Unload UAI",
-                Icon = "log-out",
-                Variant = "Red",
-                Callback = safe(function()
+            Buttons = {
+                { Title = "New conversation", Icon = "plus", Callback = safe(function() app.newConversation() end) },
+                { Title = "Search conversations", Icon = "search", Callback = safe(function() app.showSearch() end) },
+                { Title = "Conversation folders", Icon = "folder", Callback = safe(function() app.manageFolders() end) },
+                { Title = "Settings", Icon = "settings", Callback = safe(function() app.showSettingsDialog("general") end) },
+                { Title = "Providers & models", Icon = "sliders-horizontal", Callback = safe(function() app.show("providers") end) },
+                { Title = "What's new", Icon = "sparkles", Callback = safe(function() app.showChangelog() end) },
+                { Title = "ProjectUAI", Icon = "book-open", Callback = safe(function() env.require("ui/project").open() end) },
+                { Title = "About this build", Icon = "info", Callback = safe(function() app.showAbout() end) },
+                { Title = "Join Discord", Icon = "globe", Callback = safe(function() app.joinDiscord() end) },
+                { Title = "Donate", Icon = "heart", Callback = safe(function() app.donate() end) },
+                { Title = "Unload UAI", Icon = "log-out", Variant = "Red", Callback = safe(function()
                     local globals = (type(getgenv) == "function") and getgenv() or nil
                     local live = globals and globals.UAI
-                    if live and live.destroy then
-                        live.destroy()
+                    if live and live.destroy then live.destroy()
                     else
                         env.require("runtime/dispose").drain()
                         if M.window then M.window.destroy() end
                     end
-                end),
+                end) },
             },
         })
     end
@@ -112,65 +68,30 @@ return function(env)
     local function buildChrome(app)
         local w = M.window.native
 
-        -- WindUI owns the visible chrome. The old UAI application chrome is NOT
-        -- discarded: app.buildBody() below still creates the complete UAI sidebar,
-        -- conversation list and all existing panels inside the WindUI content area.
-
         w.Topbar:Button({
-            Name = "New conversation",
-            Icon = "plus",
-            LayoutOrder = 1,
-            Callback = safe(function()
-                app.newConversation()
-            end),
+            Name = "New conversation", Icon = "plus", LayoutOrder = 1,
+            Callback = safe(function() app.newConversation() end),
         })
-
         w.Topbar:Button({
-            Name = "Search conversations",
-            Icon = "search",
-            LayoutOrder = 2,
-            Callback = safe(function()
-                app.showSearch()
-            end),
+            Name = "Search conversations", Icon = "search", LayoutOrder = 2,
+            Callback = safe(function() app.showSearch() end),
         })
-
         w.Topbar:Button({
-            Name = "Folders",
-            Icon = "folder",
-            LayoutOrder = 3,
-            Callback = safe(function()
-                app.manageFolders()
-            end),
+            Name = "Folders", Icon = "folder", LayoutOrder = 3,
+            Callback = safe(function() app.manageFolders() end),
         })
-
         w.Topbar:Button({
-            Name = "Back",
-            Icon = "arrow-left",
-            LayoutOrder = 4,
-            Callback = safe(function()
-                app.back()
-            end),
+            Name = "Back", Icon = "arrow-left", LayoutOrder = 4,
+            Callback = safe(function() app.back() end),
         })
-
         w.Topbar:Button({
-            Name = "Forward",
-            Icon = "arrow-right",
-            LayoutOrder = 5,
-            Callback = safe(function()
-                app.forward()
-            end),
+            Name = "Forward", Icon = "arrow-right", LayoutOrder = 5,
+            Callback = safe(function() app.forward() end),
         })
-
         w.Topbar:Button({
-            Name = "More",
-            Icon = "ellipsis",
-            LayoutOrder = 6,
-            Callback = safe(function()
-                buildMoreDialog(app)
-            end),
+            Name = "More", Icon = "ellipsis", LayoutOrder = 6,
+            Callback = safe(function() buildMoreDialog(app) end),
         })
-
-        -- Keep the old keyboard contract too.
         w:SetToggleKey(Enum.KeyCode.RightShift)
     end
 
@@ -188,23 +109,16 @@ return function(env)
             Size = UDim2.fromOffset(900, 620),
             MinSize = Vector2.new(520, 380),
             MaxSize = Vector2.new(1280, 900),
-            SideBarWidth = 180,
+            SideBarWidth = 190,
             HidePanelBackground = true,
         })
-
-        -- The old UAI sidebar remains the actual application navigation. WindUI's
-        -- own tab rail is therefore hidden rather than duplicated.
-        pcall(function()
-            if w.UIElements and w.UIElements.SideBar then
-                w.UIElements.SideBar.Visible = false
-            end
-        end)
 
         local wrapper = {
             native = w,
             visible = false,
             maximised = false,
             body = nil,
+            root = w.ScreenGui or (w.UIElements and w.UIElements.Main and w.UIElements.Main.Main),
             header = w.UIElements and w.UIElements.Main and w.UIElements.Main.Main
                 and w.UIElements.Main.Main.Topbar or nil,
             headerHeight = 0,
@@ -217,7 +131,6 @@ return function(env)
                 if wrapper.onShow then pcall(wrapper.onShow) end
             end
         end
-
         function wrapper.hide()
             if wrapper.native and not wrapper.native.Destroyed then
                 wrapper.native:Close()
@@ -225,135 +138,134 @@ return function(env)
                 if wrapper.onHide then pcall(wrapper.onHide) end
             end
         end
-
         function wrapper.toggleMaximised()
             if wrapper.native and not wrapper.native.Destroyed then
                 wrapper.native:ToggleFullscreen()
                 wrapper.maximised = not wrapper.maximised
             end
         end
-
-        function wrapper.setMinWidth(_) end
-
-        function wrapper.destroy()
-            if wrapper.native and not wrapper.native.Destroyed then
-                wrapper.native:Destroy()
+        function wrapper.setMinWidth(value)
+            if wrapper.native and wrapper.native.UIElements and wrapper.native.UIElements.Main then
+                local size = wrapper.native.UIElements.Main.Size
+                wrapper.native.UIElements.Main.Size = UDim2.new(
+                    size.X.Scale, math.max(size.X.Offset, value or 0),
+                    size.Y.Scale, size.Y.Offset
+                )
             end
+        end
+        function wrapper.destroy()
+            if wrapper.native and not wrapper.native.Destroyed then wrapper.native:Destroy() end
             wrapper.visible = false
         end
-
         return wrapper
     end
 
-    function M.mount(app)
-        if M.window and M.window.visible then return M end
+    local function buildTabs(app)
+        local w = M.window.native
+        for _, entry in ipairs(PANELS) do
+            local tab = w:Tab({
+                Title = entry.label,
+                Icon = entry.icon,
+                ShowTabTitle = false,
+            })
+            M.tabs[entry.id] = tab
+            M.panelByIndex[tab.Index] = entry.id
 
+            local canvas = tab.UIElements and tab.UIElements.ContainerFrameCanvas
+            if not canvas then
+                error("WindUI tab content canvas is unavailable for " .. entry.id)
+            end
+            canvas.Name = "UAI_" .. entry.id
+            canvas.ClipsDescendants = true
+            M.panelHosts[entry.id] = canvas
+        end
+
+        if M.window.native.TabModule then
+            M.window.native.TabModule:OnChange(function(index)
+                local id = M.panelByIndex[index]
+                if not id or M.selecting then return end
+                M.activePanel = id
+                if M.app then
+                    M.app.showPanel(id)
+                end
+            end)
+        end
+    end
+
+    function M.mount(app)
+        if M.window then return M end
         M.app = app
         M.window = makeWindow()
-
-        -- One WindUI tab is intentional. Project UAI already has a complete
-        -- navigation system with sidebar + panel routing. Replacing that with a
-        -- second navigation system was the reason the previous port lost features.
-        local tab = M.window.native:Tab({
-            Title = "UAI",
-            Icon = "bot",
-            ShowTabTitle = false,
-        })
-        M.tab = tab
-
-        local canvas = tab.UIElements and tab.UIElements.ContainerFrameCanvas
-        if not canvas then
-            error("WindUI tab content canvas is unavailable")
-        end
-        M.canvas = canvas
-        canvas.ClipsDescendants = true
-
-        local list = tab.UIElements and tab.UIElements.ContainerFrame
-        if list then list.Visible = false end
-
-        local holder = Instance.new("Frame")
-        holder.Name = "ProjectUAIApp"
-        holder.BackgroundTransparency = 1
-        holder.BorderSizePixel = 0
-        holder.Size = UDim2.fromScale(1, 1)
-        holder.Position = UDim2.fromScale(0, 0)
-        holder.Parent = canvas
-
-        -- app.layoutNavigation() expects a legacy header object. Give it a zero-size
-        -- compatibility frame so it can continue managing the original content layout
-        -- without moving WindUI's real topbar.
-        local legacyHeader = Instance.new("Frame")
-        legacyHeader.Name = "LegacyHeaderAdapter"
-        legacyHeader.BackgroundTransparency = 1
-        legacyHeader.BorderSizePixel = 0
-        legacyHeader.Size = UDim2.fromOffset(0, 0)
-        legacyHeader.Parent = holder
-
-        M.window.header = legacyHeader
-
-        -- Bridge the original UAI application into WindUI without rewriting its
-        -- feature modules. This preserves the sidebar, conversations, code explorer,
-        -- chat composer, context controls, provider/model UI, tools, logs, settings,
-        -- permissions, asks, notifications and all existing callbacks.
-        app.window = M.window
-        M.window.body = holder
-        M.window.headerHeight = 0
-        app.body = holder
-        app.windShell = M
-
         buildChrome(app)
+        buildTabs(app)
 
-        -- Build the original UAI body exactly once inside the WindUI content canvas.
+        app.window = M.window
+        app.windShell = M
+        M.window.body = M.panelHosts[app.panel] or M.panelHosts.chat
+        M.window.headerHeight = 0
+
+        -- Build every existing UAI feature surface lazily into its WindUI tab.
+        -- No legacy sidebar/header is created in this mode.
         app.buildBody()
 
         M.window.onShow = function()
-            if app.panels and app.panels[app.panel] and app.panels[app.panel].setVisible then
-                app.panels[app.panel].setVisible(true)
-            end
-            if app.syncNav then app.syncNav() end
+            if M.app and M.app.syncNav then M.app.syncNav() end
         end
-
         M.window.onHide = function()
-            if app.panels and app.panels[app.panel] and app.panels[app.panel].setVisible then
-                app.panels[app.panel].setVisible(false)
-            end
+            -- Preserve UAI's focus/lifecycle contract when the WindUI window closes.
+            pcall(function()
+                local field = env.uis:GetFocusedTextBox()
+                if field and M.window.root and field:IsDescendantOf(M.window.root) then
+                    field:ReleaseFocus()
+                end
+            end)
         end
-
         M.window.show()
         return M
     end
 
-    -- Called by app.showPanel after the panel has been built. It only changes the
-    -- WindUI shell state; it never calls app.showPanel, avoiding recursion.
-    function M.syncSelection(id)
-        if not M.window or not M.tab then return end
-        -- There is only one WindUI tab. The actual panel selection remains UAI's
-        -- existing sidebar/router, so no feature is duplicated or lost.
+    function M.getPanelHost(id)
+        return M.panelHosts[id] or M.panelHosts.chat
+    end
+
+    function M.selectPanel(id)
+        if not M.window or not M.tabs[id] then return end
         M.activePanel = id
+        M.selecting = true
+        local ok, err = pcall(function()
+            M.tabs[id]:Select()
+        end)
+        if not ok then
+            pcall(function() M.window.native:SelectTab(M.tabs[id].Index) end)
+        end
+        M.selecting = false
+        M.window.body = M.panelHosts[id]
+    end
+
+    function M.syncSelection(id)
+        if not id then return end
+        M.activePanel = id
+        if M.tabs[id] then M.selectPanel(id) end
     end
 
     function M.show(id)
-        if not M.window then
-            return M.mount(M.app)
-        end
-        if id and M.app then self = M end
+        if not M.window then M.mount(M.app) end
+        if id then M.selectPanel(id) end
         M.window.show()
         return M
     end
-
     function M.hide()
         if M.window then M.window.hide() end
     end
-
     function M.toggle()
         if M.window and M.window.visible then M.hide() else M.show() end
     end
-
     function M.destroy()
         if M.window then M.window.destroy() end
         M.window = nil
-        M.tab = nil
-        M.canvas = nil
+        M.tabs = {}
+        M.panelHosts = {}
+        M.panelByIndex = {}
         M.app = nil
     end
 
