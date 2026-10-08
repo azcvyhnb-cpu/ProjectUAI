@@ -162,13 +162,15 @@ local bundle = table.concat(out, "\n")
 
 -- The bundle has to parse as one chunk, or a syntax error in one module becomes a
 -- mystery at load time in a game.
-local check, problems = luau.load(bundle, "dist/uai.lua", { entry = true })
-if not check then
-	io.stderr:write("the assembled bundle does not parse:\n")
-	for _, problem in ipairs(problems or {}) do
-		io.stderr:write(string.format("  dist/uai.lua:%d: %s\n", problem.line or 0, problem.msg or "?"))
+if not nativeOnly then
+	local check, problems = luau.load(bundle, "dist/uai.lua", { entry = true })
+	if not check then
+		io.stderr:write("the assembled bundle does not parse:\n")
+		for _, problem in ipairs(problems or {}) do
+			io.stderr:write(string.format("  dist/uai.lua:%d: %s\n", problem.line or 0, problem.msg or "?"))
+		end
+		os.exit(1)
 	end
-	os.exit(1)
 end
 
 if checkOnly then
