@@ -846,6 +846,9 @@ return function(env)
 	-- The rebuild underneath it still ran, which is what made the button look wired --
 	-- the whole tree was torn down and rebuilt byte-identical.
 	function M.toggleSidebar()
+		if M.windShell and M.windShell.toggleSidebar then
+			return M.windShell.toggleSidebar()
+		end
 		local collapsed = config.get("ui.sidebarCollapsed", false) == true
 		config.set("ui.sidebarCollapsed", not collapsed, { quiet = true })
 		M.layoutNavigation()
