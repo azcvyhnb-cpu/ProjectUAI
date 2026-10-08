@@ -80,13 +80,13 @@ return function(env)
 			-- for ninety seconds produces nothing on the wire until it answers -- and the
 			-- executor's own default timeout is sixty.
 			--
-			-- A day, and it is the highest default of any clock in this client: this is the
+			-- Thirty minutes is the hard ceiling for one model inference: this is the
 			-- one deadline nothing else can rescue, because a subagent or a tool that hits
 			-- its own budget still gets its report collected, while a request that times out
 			-- is a turn spent for nothing. Subagents run the same loop as the conversation
 			-- the user is watching, so their model calls inherit this too -- a child stopped
 			-- mid-think by the transport is a dispatch wasted.
-			requestTimeout = 86400,
+			requestTimeout = 1800,
 			-- The switch below is now the semantic one rather than the escape hatch: it
 			-- reads as "no deadline at all" and means the same day as the default does,
 			-- which is the honest bound -- a request nobody collects is indistinguishable
