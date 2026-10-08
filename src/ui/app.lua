@@ -168,7 +168,9 @@ return function(env)
 		local windShell = env.require("ui/wind_shell")
 		M.windShell = windShell.mount(M)
 		M.window = M.windShell.window
-		M.screen = M.windShell.screen or M.window.root
+		-- Keep M.screen as the original app ScreenGui. Overlay, cleanup and
+		-- lifecycle code intentionally own that surface; WindUI has its own ScreenGui.
+
 
 		-- Layout switches retain the original panes. Theme changes (accent,
 		-- density, text scale, either font, the code palette, the reading width)
