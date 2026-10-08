@@ -1035,6 +1035,9 @@ return function(env)
 		if M.panels[id].setVisible then M.panels[id].setVisible(true) end
 		M.panel = id
 		config.set("ui.panel", id, { quiet = true })
+		if M.windShell and M.windShell.syncSelection then
+			M.windShell.syncSelection(id)
+		end
 		if id == "chat" then M.attachSession() end
 		M.record()
 		M.syncNav()
@@ -1635,6 +1638,40 @@ return function(env)
 		local wasVisible = M.window and M.window.visible
 		local panel = M.panel
 
+		if M.windShell then
+			-- WindUI is the presentation layer. Rebuild it as a whole instead of
+			-- accidentally falling back to the legacy UAI window after a theme/view
+			-- change. The agent/session/panel modules remain untouched.
+			if M.sessionUnsubscribe then
+				M.sessionUnsubscribe()
+				M.sessionUnsubscribe = nil
+			end
+			for _, existing in pairs(M.panels or {}) do
+				if existing.destroy then pcall(existing.destroy) end
+			end
+			M.panels = {}
+			M.chatPanel = nil
+			local oldShell = M.windShell
+			oldShell.destroy()
+			M.windShell = nil
+			M.window = nil
+			M.body = nil
+			M.sideHolder = nil
+			M.sideDivider = nil
+			M.mainHolder = nil
+			M.sidebar = nil
+			M.panel = panel
+			local shell = env.require("ui/wind_shell")
+			M.windShell = shell.mount(M)
+			M.window = M.windShell.window
+			M.showPanel(panel)
+			if wasVisible then M.window.show() end
+			log.debug("app", "rebuilt WindUI for " .. tostring(reason))
+			return
+		end
+
+		-- Legacy fallback (kept for compatibility with non-WindUI builds).
+		local wasVisibleLegacy = M.window and M.window.visible
 		if M.sessionUnsubscribe then
 			M.sessionUnsubscribe()
 			M.sessionUnsubscribe = nil
@@ -1644,27 +1681,20 @@ return function(env)
 		end
 		M.panels = {}
 		M.chatPanel = nil
-
-		if M.windShell then
-			pcall(function() M.windShell.destroy() end)
-			M.windShell = nil
+		M.sidebar = nil
+		M.titleLabel = nil
+		M.subtitleLabel = nil
+		if M.window then M.window.destroy() end
+		if M.launcher then
+			M.launcher:Destroy()
+			M.launcher = nil
 		end
-		M.window = nil
-		M.screen = nil
-		M.body = nil
 		M.panel = panel
-
-		local windShell = env.require("ui/wind_shell")
-		M.windShell = windShell.mount(M)
-		M.window = M.windShell.window
-		M.screen = M.windShell.screen or M.window.root
-
-		if wasVisible and M.window and not M.window.visible then
-			M.window.show()
-		end
-		M.setLauncherBusy(not wasVisible and sessions.busyCount() > 0)
-		log.debug("app", "rebuilt for " .. tostring(reason) .. " with WindUI")
+		M.buildLauncher()
+		M.buildWindow()
+		if wasVisibleLegacy then M.window.show() end
+		M.setLauncherBusy(not wasVisibleLegacy and sessions.busyCount() > 0)
+		log.debug("app", "rebuilt for " .. tostring(reason) .. " as " .. responsive.mode)
 	end
-
 	return M
 end
