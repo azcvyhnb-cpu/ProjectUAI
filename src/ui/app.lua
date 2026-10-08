@@ -665,6 +665,7 @@ return function(env)
 	-- early from on re-entry -- so the field and `ui.sidebarCollapsed` could diverge and
 	-- never reconcile, and the switch in the appearance pane wrote a value nothing read.
 	function M.sidebarVisible()
+		if M.windShell then return false end
 		if config.get("ui.sidebarCollapsed", false) == true then return false end
 		return responsive.isMobile() or responsive.mode == "window"
 	end
@@ -672,6 +673,7 @@ return function(env)
 	-- Keep the original desktop panes mounted at every handheld size. Only an
 	-- explicit sidebar toggle hides it; rotation never replaces the composition.
 	function M.layoutNavigation()
+		if M.windShell then return end
 		if not M.window or not M.mainHolder then return end
 		local shown = M.sidebarVisible()
 		M.window.setMinWidth((shown and theme.size.sidebar or 0) + theme.size.modalMin + theme.space.xl * 2)
@@ -850,6 +852,17 @@ return function(env)
 	end
 
 	function M.buildBody()
+		-- WindUI mode: WindUI owns navigation and presentation. The original UAI
+		-- panel builders remain the feature layer and are mounted into their
+		-- corresponding WindUI tab canvases.
+		if M.windShell and M.windShell.panelHosts then
+			M.body = M.windShell.panelHosts[M.panel] or M.windShell.panelHosts.chat
+			M.panels = {}
+			M.showPanel(M.panel)
+			return
+		end
+
+
 		local sidebarWidth = theme.size.sidebar
 
 		local host = M.window.body
@@ -907,6 +920,7 @@ return function(env)
 		M.panels = {}
 		M.showPanel(M.panel)
 	end
+
 
 	-- Panels -----------------------------------------------------------------
 
@@ -1010,14 +1024,15 @@ return function(env)
 	end
 
 	function M.showPanel(id)
-		if not M.body then return end
+		if not M.body and not (M.windShell and M.windShell.panelHosts) then return end
 		if not BUILDERS[id] then id = "chat" end
+		local panelParent = (M.windShell and M.windShell.panelHosts and M.windShell.panelHosts[id]) or M.body
 		for key, panel in pairs(M.panels or {}) do
 			if panel.root then panel.root.Visible = key == id end
 			if panel.setVisible then panel.setVisible(key == id) end
 		end
 		if not M.panels[id] then
-			local holder = P.frame(M.body, {
+			local holder = P.frame(panelParent, {
 				name = "Panel_" .. id,
 				size = UDim2.fromScale(1, 1),
 			})
