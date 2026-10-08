@@ -615,7 +615,7 @@ return function(env)
 		local headers = rebuildHeaders()
 
 		local started = clock.ms()
-		local deadline = started + math.max(1, math.min(300, tonumber(requestTimeout(request)) or 120)) * 1000
+		local deadline = started + math.max(1, math.min(1800, tonumber(requestTimeout(request)) or 120)) * 1000
 		local recovery = proxy.new(record, { aborted = request.aborted, onRetry = request.onRetry, deadlineMs = deadline })
 		local lastRequestMs = 0
 		local rotationsLeft = math.max(#pool - 1, 0)
@@ -724,20 +724,10 @@ return function(env)
 
 		-- The executor's transport wall: no body, no headers, an executor raise for
 		-- the error text. Same one smaller-ask retry as the chat adapter, so a model
-		-- can finish inside the wall. Only after 20-130 seconds without a response,
-		-- and only when the smaller ask is actually smaller.
+		-- Do not reduce reasoning effort because a request is taking a long time.
+		-- Long reasoning is valid work; the 30-minute transport ceiling is the only
+		-- wall for a single inference.
 		local recoveredTokens
-		if not res and err and not http.terminal(err) and lastRequestMs >= 20000 and lastRequestMs <= 130000 then
-			local lowered, note = smallerAsk(body)
-			if lowered and util.encode(lowered) ~= util.encode(body) then
-				log.info("provider", record.label .. ": hit the transport wall, retrying smaller (" .. note .. ")")
-				if request.onRetry then
-					request.onRetry({ attempt = 1, attempts = 2, wait = 0, reason = note, status = 0 })
-				end
-				res, err = fireWithRotation(lowered)
-				if res and res.ok then recoveredTokens = lowered.max_tokens end
-			end
-		end
 
 		if not res or not res.ok then
 			if registry.compatibilityKey(record) == requestScope then openai.learnContextWindow(record, res) end
