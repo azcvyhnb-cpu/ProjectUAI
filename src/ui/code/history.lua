@@ -153,10 +153,26 @@ return function(env)
 			fieldsList = common.virtualList(content, { name = "ChangedFields", size = UDim2.new(1, 0, 1, -trayHeight), rowHeight = common.pixels(58), detail = function(item) return item.description end, onSelect = function(item) selectField(item.index) end })
 			selectField(fieldIndex)
 			sizeFields = function()
-				local height = math.min(trayHeight, math.max(common.pixels(100), content.AbsoluteSize.Y * 0.46))
+				-- Label strips scale with pixels(), text does not: on a short, compact pane
+				-- the fixed strips would leave the value previews under two mono lines.
+				-- Size the strips from the text they hold and reserve two value lines.
+				local pathHeight = math.max(common.pixels(30), theme.text.caption.height + theme.space.xxs)
+				local labelHeight = math.max(common.pixels(22), theme.text.caption.height)
+				local minimum = pathHeight + labelHeight + theme.text.mono.height * 2
+				if content.AbsoluteSize.Y - fieldsList.rowHeight < minimum then
+					-- Too short for the padded strips: keep the text, drop the padding.
+					pathHeight, labelHeight = theme.text.caption.height + theme.space.xxs, theme.text.caption.height
+					minimum = pathHeight + labelHeight + theme.text.mono.height * 2
+				end
+				local height = math.max(minimum, math.min(trayHeight, math.max(common.pixels(100), content.AbsoluteSize.Y * 0.46)))
+				local rowFloor = content.AbsoluteSize.Y - fieldsList.rowHeight
+				if rowFloor >= minimum then height = math.min(height, rowFloor) end
 				pathLabel.Visible, fieldsList.root.Visible = true, true
-				beforeHost.Position, beforeHost.Size = UDim2.fromOffset(0, common.pixels(30)), UDim2.new(0.5, common.pixels(-3), 1, common.pixels(-30))
-				afterHost.Position, afterHost.Size = UDim2.new(0.5, common.pixels(3), 0, common.pixels(30)), UDim2.new(0.5, common.pixels(-3), 1, common.pixels(-30))
+				pathLabel.Size = UDim2.new(1, common.pixels(-20), 0, pathHeight)
+				beforeHost.Position, beforeHost.Size = UDim2.fromOffset(0, pathHeight), UDim2.new(0.5, common.pixels(-3), 1, -pathHeight)
+				afterHost.Position, afterHost.Size = UDim2.new(0.5, common.pixels(3), 0, pathHeight), UDim2.new(0.5, common.pixels(-3), 1, -pathHeight)
+				beforeValues.Position, beforeValues.Size = UDim2.fromOffset(0, labelHeight), UDim2.new(1, 0, 1, -labelHeight)
+				afterValues.Position, afterValues.Size = UDim2.fromOffset(0, labelHeight), UDim2.new(1, 0, 1, -labelHeight)
 				tray.Position, tray.Size = UDim2.new(0, 0, 1, -height), UDim2.new(1, 0, 0, height)
 				fieldsList.root.Size = UDim2.new(1, 0, 1, -height)
 			end

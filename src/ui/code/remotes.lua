@@ -447,8 +447,12 @@ return function(env)
 			local top = common.barHeight() * 2 + theme.text.caption.height * 2 + theme.space.sm
 			info.Position, info.Size = UDim2.fromOffset(common.pixels(10), common.barHeight() * 2 + theme.space.xxs), UDim2.new(1, -theme.space.xl, 0, theme.text.caption.height * 2 + theme.space.xxs)
 			body.Position, body.Size = UDim2.fromOffset(0, top), UDim2.new(1, 0, 1, -top)
-			local wide = root.AbsoluteSize.X >= common.pixels(620)
 			local width = math.max(common.pixels(240), math.min(root.AbsoluteSize.X - common.pixels(280), view.listWidth or root.AbsoluteSize.X * 0.4))
+			-- pixels() shrinks with a compact density, so the breakpoint alone can call a
+			-- 320px phone wide and split it into a 128px list. Split only when the list
+			-- pane can still hold its header: the list tabs beside the Follow control.
+			local headerMinimum = math.max(common.pixels(100), common.controlHeight() * 2 + common.inset() * 2) + listBar.width()
+			local wide = root.AbsoluteSize.X >= common.pixels(620) and width >= headerMinimum
 			listHost.Visible, detailHost.Visible = wide or not view.detail, wide or view.detail == true
 			listHost.Size = wide and UDim2.new(0, width, 1, 0) or UDim2.fromScale(1, 1)
 			layoutListHeader()
