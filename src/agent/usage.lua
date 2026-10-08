@@ -122,7 +122,13 @@ return function(env)
 		local price = M.priceFor(model, record)
 		local cost = 0
 		if price then
-			cost = (prompt / 1000000) * price[1] + (completion / 1000000) * price[2]
+			-- Messages-API cache fields are priced explicitly: reads at a tenth of the
+			-- input rate, writes at 1.25x. Chat-completions cached_tokens keep the
+			-- plain rate because their discount differs by provider.
+			local read = estimated and 0 or (tonumber(util.get(usage or {}, "cache_read_input_tokens", 0)) or 0)
+			local written = estimated and 0 or (tonumber(util.get(usage or {}, "cache_creation_input_tokens", 0)) or 0)
+			local plain = math.max(0, prompt - read - written)
+			cost = ((plain + read * 0.1 + written * 1.25) / 1000000) * price[1] + (completion / 1000000) * price[2]
 		end
 
 		if not (fallback and fallback.background) then

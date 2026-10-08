@@ -103,11 +103,22 @@ return function(env)
 			out[#out + 1] = { role = role, content = content }
 		end
 
+		-- The leading system message may name a stable prefix (context.wire's
+		-- cachePrefix). It is split there so the prefix can carry a cache breakpoint;
+		-- the joined string stays the canonical form for every other caller.
+		local stable
 		for _, message in ipairs(messages or {}) do
 			local role = message.role
 			if role == "system" then
-				local text = util.trim(tostring(message.content or ""))
-				if text ~= "" then system[#system + 1] = text end
+				local raw = tostring(message.content or "")
+				local text = util.trim(raw)
+				if text ~= "" then
+					local prefix = tonumber(message.cachePrefix)
+					if #system == 0 and prefix and prefix > 0 and prefix < #raw and raw == text then
+						stable = util.trim(raw:sub(1, prefix))
+					end
+					system[#system + 1] = text
+				end
 			elseif role == "tool" then
 				local block = {
 					type = "tool_result",
@@ -170,7 +181,92 @@ return function(env)
 		if out[1] and out[1].role ~= "user" then
 			table.insert(out, 1, { role = "user", content = "Continue." })
 		end
-		return out, table.concat(system, "\n\n")
+		local joined = table.concat(system, "\n\n")
+		local blocks
+		if joined ~= "" then
+			if stable and stable ~= "" and joined:sub(1, #stable) == stable and #joined > #stable then
+				local rest = util.trim(joined:sub(#stable + 1))
+				blocks = { { type = "text", text = stable }, { type = "text", text = rest } }
+			end
+		end
+		return out, joined, blocks
+	end
+
+	-- Explicit prompt caching. Three of the four allowed breakpoints: the end of
+	-- the tool list, the end of the stable system prefix, and the newest user
+	-- turn, so each step of a tool loop reads the previous step's whole prefix
+	-- from cache instead of paying for it again. On by default; a provider that
+	-- refuses the field is remembered per compatibility scope and sent nothing.
+	function M.cacheEnabled(record)
+		if config.get("agent.promptCache", true) == false then return false end
+		if type(record) ~= "table" or record.promptCache == false then return false end
+		local refused = record.promptCacheRefused
+		if refused ~= nil and refused == registry.compatibilityKey(record) then return false end
+		return true
+	end
+
+	local EPHEMERAL = { type = "ephemeral" }
+
+	local function markLastMessage(messages)
+		local last = messages[#messages]
+		if not last or last.role ~= "user" then return false end
+		if type(last.content) == "string" then
+			if util.trim(last.content) == "" then return false end
+			last.content = { { type = "text", text = last.content, cache_control = EPHEMERAL } }
+			return true
+		end
+		if type(last.content) ~= "table" then return false end
+		local block = last.content[#last.content]
+		if type(block) ~= "table" or (block.type ~= "text" and block.type ~= "tool_result") then return false end
+		local copy = {}
+		for index, value in ipairs(last.content) do copy[index] = value end
+		copy[#copy] = util.merge(block, { cache_control = EPHEMERAL })
+		last.content = copy
+		return true
+	end
+
+	function M.applyCache(body, blocks)
+		-- Without a stable split the system prompt stays a string: the breakpoint
+		-- on the newest user turn already covers everything before it.
+		if type(blocks) == "table" and #blocks > 0 then
+			local system = {}
+			for index, block in ipairs(blocks) do system[index] = { type = "text", text = block.text } end
+			system[1].cache_control = EPHEMERAL
+			body.system = system
+		end
+		if type(body.tools) == "table" and #body.tools > 0 then
+			body.tools[#body.tools] = util.merge(body.tools[#body.tools], { cache_control = EPHEMERAL })
+		end
+		markLastMessage(body.messages or {})
+		return body
+	end
+
+	-- Undo applyCache for a provider that rejected it.
+	function M.stripCache(body)
+		if type(body.system) == "table" then
+			local parts = {}
+			for _, block in ipairs(body.system) do parts[#parts + 1] = block.text end
+			body.system = table.concat(parts, "\n\n")
+		end
+		for index, tool in ipairs(body.tools or {}) do
+			if tool.cache_control then
+				local copy = util.copy(tool)
+				copy.cache_control = nil
+				body.tools[index] = copy
+			end
+		end
+		for _, message in ipairs(body.messages or {}) do
+			if type(message.content) == "table" then
+				for index, block in ipairs(message.content) do
+					if type(block) == "table" and block.cache_control then
+						local copy = util.copy(block)
+						copy.cache_control = nil
+						message.content[index] = copy
+					end
+				end
+			end
+		end
+		return body
 	end
 
 	-- A tool definition loses its `function` wrapper and its schema is renamed.
@@ -190,7 +286,7 @@ return function(env)
 	end
 
 	function M.buildBody(record, request)
-		local messages, system = M.wireMessages(request.messages)
+		local messages, system, systemBlocks = M.wireMessages(request.messages)
 		-- Clamped to whatever this record's model was last told it allows, which is
 		-- shared with the chat-completions adapter because the lesson is the same one.
 		local maxTokens = openai.cappedMaxTokens(record,
@@ -227,6 +323,7 @@ return function(env)
 		for key, value in pairs(record.params or {}) do body[key] = value end
 		for key, value in pairs(request.extra or {}) do body[key] = value end
 		openai.enforceOutputCeiling(record, body, request.outputCeiling)
+		if request.cache ~= false and M.cacheEnabled(record) then M.applyCache(body, systemBlocks) end
 		-- This adapter has no WebSocket path; SSE here still arrives over HTTP.
 		return body
 	end
@@ -240,13 +337,19 @@ return function(env)
 
 	local function normaliseUsage(usage)
 		usage = usage or {}
-		local input = usage.input_tokens or 0
 		local output = usage.output_tokens or 0
+		-- input_tokens excludes cached reads and cache writes. The prompt really was
+		-- all three, and the context estimator calibrates against this figure, so a
+		-- cached request must not look like a tiny one.
+		local read = tonumber(usage.cache_read_input_tokens) or 0
+		local written = tonumber(usage.cache_creation_input_tokens) or 0
+		local input = (tonumber(usage.input_tokens) or 0) + read + written
 		-- Renamed to the OpenAI keys the usage panel reads, originals kept alongside.
 		return {
 			prompt_tokens = input,
 			completion_tokens = output,
 			total_tokens = input + output,
+			prompt_tokens_details = read > 0 and { cached_tokens = read } or nil,
 			cache_read_input_tokens = usage.cache_read_input_tokens,
 			cache_creation_input_tokens = usage.cache_creation_input_tokens,
 		}
@@ -576,6 +679,25 @@ return function(env)
 		end
 
 		local res, err = fireWithRotation(body)
+
+		-- A gateway that relays the Messages shape but not its caching field. Send
+		-- the same request without it once, and remember the refusal for this
+		-- endpoint/model scope so later turns do not pay for the lesson again.
+		if res and res.status == 400 then
+			local message = tostring(M.errorText(res, nil) or ""):lower()
+			if message:find("cache_control", 1, true) then
+				M.stripCache(body)
+				if registry.compatibilityKey(record) == requestScope then
+					record.promptCacheRefused = requestScope
+					registry.save(record, { force = true })
+				end
+				log.info("provider", record.label .. ": prompt caching refused, retrying without it")
+				if request.onRetry then
+					request.onRetry({ attempt = 1, attempts = 2, wait = 0, reason = "dropped cache_control", status = 400 })
+				end
+				res, err = fireWithRotation(body)
+			end
+		end
 
 		-- max_tokens is mandatory on this API and its limit is per model, so a reply
 		-- ceiling chosen for the widest Claude is a hard 400 on a narrower one -- and

@@ -204,14 +204,108 @@ return function(env)
 	-- model shown a tool will use it, and a turn spent learning that writefile does
 	-- not exist here is a wasted turn. Read-only mode omits everything that writes,
 	-- for the same reason.
+	--
+	-- With `opts.lazy`, groups in DEFERRED are summarised by tools_load instead of
+	-- being sent in full. A loaded group (`opts.loaded[group] = sequence`) is
+	-- appended after the core list in load order, so loading one never shifts the
+	-- byte prefix a provider has already cached.
+	local DEFERRED = {
+		coding = true, iy = true, remotes = true, chat = true, gui = true, gravity = true,
+		world = true, character = true, input = true, net = true, templates = true, screen = true,
+	}
+	M.DEFERRED = DEFERRED
+
+	function M.isDeferred(group)
+		return DEFERRED[tostring(group)] == true and config.get("agent.lazyTools", true) ~= false
+	end
+
+	local function offered(tool, opts, readonly)
+		if M.missingCapability(tool) then return false end
+		if readonly and tool.risk ~= "read" then return false end
+		if permissions.ruleFor(tool.name) == "deny" then return false end
+		if not M.groupEnabled(tool.group) then return false end
+		if opts.only and not opts.only[tool.name] then return false end
+		if opts.exclude and opts.exclude[tool.name] then return false end
+		if opts.groups and not opts.groups[tool.group] then return false end
+		return true
+	end
+
+	-- Deferred groups this scope could load, with the tool names in each. Read by
+	-- tools_load for its description and its validation.
+	function M.deferredCatalog(opts)
+		opts = opts or {}
+		M.load()
+		local readonly = permissions.mode() == "readonly"
+		local byGroup, order = {}, {}
+		for _, name in ipairs(M.order) do
+			local tool = M.tools[name]
+			if M.isDeferred(tool.group) and offered(tool, opts, readonly) then
+				local entry = byGroup[tool.group]
+				if not entry then
+					entry = { group = tool.group, label = M.groupLabel(tool.group), names = {} }
+					byGroup[tool.group] = entry
+					order[#order + 1] = entry
+				end
+				entry.names[#entry.names + 1] = name
+			end
+		end
+		return order, byGroup
+	end
+
 	function M.definitions(opts)
 		opts = opts or {}
 		M.load()
 		local readonly = permissions.mode() == "readonly"
-		local out = {}
+		local lazy = opts.lazy == true and opts.only == nil and config.get("agent.lazyTools", true) ~= false
+		local loaded = opts.loaded or {}
+		local out, later = {}, {}
+		local function definition(tool)
+			local description = tool.description
+			if type(tool.describe) == "function" then
+				local ok, value = pcall(tool.describe, opts)
+				if ok and type(value) == "string" then description = value end
+			end
+			return {
+				type = "function",
+				["function"] = {
+					name = tool.name,
+					description = description,
+					parameters = normaliseSchema(tool.parameters),
+				},
+			}
+		end
+		if lazy then
+			local hasDeferred = false
+			for _, name in ipairs(M.order) do
+				local tool = M.tools[name]
+				if tool.lazyOnly ~= true and offered(tool, opts, readonly) then
+					if M.isDeferred(tool.group) then
+						hasDeferred = true
+						if loaded[tool.group] then
+							later[#later + 1] = { tool = tool, seq = tonumber(loaded[tool.group]) or 0, reg = registrations[name] or 0 }
+						end
+					else
+						out[#out + 1] = definition(tool)
+					end
+				end
+			end
+			-- The loader belongs to no preset: a scope that can see a deferred group
+			-- must be able to load it, whatever groups that scope otherwise names.
+			local loader = M.tools.tools_load
+			if hasDeferred and loader and permissions.ruleFor(loader.name) ~= "deny"
+				and not (opts.exclude and opts.exclude[loader.name]) then
+				out[#out + 1] = definition(loader)
+			end
+			table.sort(later, function(a, b)
+				if a.seq ~= b.seq then return a.seq < b.seq end
+				return a.reg < b.reg
+			end)
+			for _, entry in ipairs(later) do out[#out + 1] = definition(entry.tool) end
+			return out
+		end
 		for _, name in ipairs(M.order) do
 			local tool = M.tools[name]
-			local allow = true
+			local allow = tool.lazyOnly ~= true
 			if M.missingCapability(tool) then allow = false end
 			if readonly and tool.risk ~= "read" then allow = false end
 			if permissions.ruleFor(name) == "deny" then allow = false end
@@ -223,16 +317,7 @@ return function(env)
 			-- wasted turn, which is the same reasoning as a missing capability.
 			if opts.exclude and opts.exclude[name] then allow = false end
 			if opts.groups and not opts.groups[tool.group] then allow = false end
-			if allow then
-				out[#out + 1] = {
-					type = "function",
-					["function"] = {
-						name = tool.name,
-						description = tool.description,
-						parameters = normaliseSchema(tool.parameters),
-					},
-				}
-			end
+			if allow then out[#out + 1] = definition(tool) end
 		end
 		return out
 	end
@@ -281,10 +366,10 @@ return function(env)
 			elseif ctx and ctx.aborted and ctx.aborted() then
 				result.error = "aborted"
 				result.text = "Stopped before " .. name .. " ran."
-			elseif not M.groupEnabled(tool.group) then
+			elseif not tool.lazyOnly and not M.groupEnabled(tool.group) then
 				reason = "its tool group is disabled"
 			elseif owner and ((owner.toolFilter and not owner.toolFilter[name])
-				or (owner.toolGroups and not owner.toolGroups[tool.group])
+				or (not tool.lazyOnly and owner.toolGroups and not owner.toolGroups[tool.group])
 				or (owner.toolExclude and owner.toolExclude[name])) then
 				reason = "it is outside this conversation's tool scope"
 			else

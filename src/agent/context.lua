@@ -460,14 +460,21 @@ return function(env)
 
 		-- Wire form. The summary rides as a second system message so it cannot be
 		-- confused with the live instructions and is trivially droppable.
-		function ctx.wire(systemText)
+		function ctx.wire(systemText, cachePrefix)
 			-- Repaired here rather than at each adapter: this is the single funnel both of
 			-- them are fed from, and doing it to the store rather than to a copy means one
 			-- broken turn is fixed once instead of warned about on every request.
 			ctx.repair()
 			local out = {}
 			if systemText and util.trim(systemText) ~= "" then
-				out[#out + 1] = { role = "system", content = systemText }
+				local message = { role = "system", content = systemText }
+				-- Byte length of the stable leading part, for adapters with explicit
+				-- prompt caching. Never part of what is sent.
+				cachePrefix = tonumber(cachePrefix)
+				if cachePrefix and cachePrefix >= 1 and cachePrefix < #systemText then
+					message.cachePrefix = math.floor(cachePrefix)
+				end
+				out[#out + 1] = message
 			end
 			if ctx.summary then
 				out[#out + 1] = { role = "system", content = "Earlier in this conversation:\n" .. ctx.summary }

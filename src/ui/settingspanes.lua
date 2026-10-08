@@ -1209,6 +1209,16 @@ return function(env)
 			path = "agent.compaction",
 		})
 		R.toggle(agent, {
+			label = "Load tools on demand",
+			hint = "Send core tools with every request and let the agent load other groups when a task needs them. Smaller requests, faster replies, lower cost.",
+			path = "agent.lazyTools",
+		})
+		R.toggle(agent, {
+			label = "Prompt caching",
+			hint = "Mark the stable prompt prefix for Anthropic Messages providers so repeated steps are read from cache. Providers that refuse it are remembered and sent nothing.",
+			path = "agent.promptCache",
+		})
+		R.toggle(agent, {
 			label = "Provider fallback",
 			hint = "Try the next enabled provider when one fails.",
 			path = "agent.fallback",

@@ -311,7 +311,7 @@ Background chat:
   The chat UI also offers a Stop all control. Never claim a message was delivered
   when the chat transport reports failure.]]
 
-	local function environmentBlock()
+	local function environmentBlock(date)
 		local lines = {}
 
 		local workspace = env.require("runtime/workspace").describe()
@@ -384,23 +384,29 @@ Background chat:
 		-- The date, because a model without one anchors on its training cutoff and
 		-- misjudges every "latest" and "recently". os.date with ! is UTC, which is the
 		-- one clock every party to the conversation can be assumed to share.
-		lines[#lines + 1] = "Date: " .. os.date("!%Y-%m-%d %H:%M UTC")
+		lines[#lines + 1] = "Date: " .. (type(date) == "string" and date or os.date("!%Y-%m-%d %H:%M UTC"))
 		local live = env.require("agent/context").workspaceSummary()
 		if live then lines[#lines + 1] = "Live workspace references (read details with tools): " .. live end
 
 		return table.concat(lines, "\n")
 	end
 
-	-- Assembled fresh each turn. The order matters: identity, then the facts, then
-	-- the rules, then the mutable blocks last so they are closest to the
-	-- conversation and hardest to lose to attention decay.
-	function M.build(opts)
+	local LAZY_TOOLS = [[
+Tool loading:
+- Core tools are described directly. Other groups (code workspace, remotes, interface,
+  world, character, input, chat, HTTP, templates, Infinite Yield, Project Gravity) are
+  listed by tools_load. Load every group a task needs in one tools_load call, then use
+  those tools from the next step. Do not load groups the task does not need.]]
+
+	-- Assembled fresh each turn. The order matters twice over. For the model:
+	-- identity, then the rules, then the mutable blocks last so they are closest
+	-- to the conversation and hardest to lose to attention decay. For the
+	-- provider: everything before the environment block is byte-identical across
+	-- steps and turns, so it is a cacheable prefix. The second return value is
+	-- its length in bytes; adapters that support explicit caching mark it.
+	function M.buildWithPrefix(opts)
 		opts = opts or {}
 		local parts = { IDENTITY, "", SKILLS_FIRST, "", NATIVE_WORKSPACE, "", SCRIPT_UI, "", SCRIPT_PROJECTS, "" }
-
-		parts[#parts + 1] = "Environment:"
-		parts[#parts + 1] = environmentBlock()
-		parts[#parts + 1] = ""
 
 		if opts.model and util.trim(opts.model) ~= "" then
 			parts[#parts + 1] = "You are running on model " .. tostring(opts.model) ..
@@ -417,6 +423,13 @@ Background chat:
 		parts[#parts + 1] = SCOPE
 		parts[#parts + 1] = ""
 		parts[#parts + 1] = STYLE
+		if config.get("agent.lazyTools", true) ~= false then
+			parts[#parts + 1] = ""
+			parts[#parts + 1] = LAZY_TOOLS
+		end
+
+		local static = table.concat(parts, "\n")
+		parts = { static, "", "Environment:", environmentBlock(opts.date) }
 
 		local permissions = env.require("agent/permissions")
 		parts[#parts + 1] = ""
@@ -477,12 +490,17 @@ Background chat:
 			parts[#parts + 1] = custom
 		end
 
-		return table.concat(parts, "\n")
+		return table.concat(parts, "\n"), #static
+	end
+
+	-- The prompt text alone, for callers that only want the string.
+	function M.build(opts)
+		return (M.buildWithPrefix(opts))
 	end
 
 	-- A subagent gets a narrower brief: it cannot talk to the user, so its output
 	-- contract is different from the main agent's.
-	function M.subagent(task, opts)
+	function M.subagentWithPrefix(task, opts)
 		opts = opts or {}
 		-- What the step budget is, in the words that change behaviour. A model told it
 		-- has few turns left rations them: it stops reading early and guesses the rest.
@@ -504,9 +522,6 @@ Background chat:
 			SCRIPT_UI,
 			SCRIPT_PROJECTS,
 			DELEGATION,
-			"",
-			"Environment:",
-			environmentBlock(),
 			"",
 			"Your task is fixed and stated below. You cannot ask the user questions. Your final message",
 			"is handed back to the parent agent as a report, so make it a complete answer to the task,",
@@ -535,10 +550,16 @@ Background chat:
 			"  task over.",
 			"",
 			SCOPE,
-			"",
-			"Task:",
-			tostring(task),
 		}
+		if config.get("agent.lazyTools", true) ~= false then
+			parts[#parts + 1] = ""
+			parts[#parts + 1] = LAZY_TOOLS
+		end
+		-- Identical for every subagent with the same budget switch, so siblings
+		-- dispatched together share one cached prefix. The task and the environment
+		-- come after it.
+		local static = table.concat(parts, "\n")
+		parts = { static, "", "Environment:", environmentBlock(opts.date), "", "Task:", tostring(task) }
 		-- The user's standing instructions ride along. A subagent answers to the
 		-- parent rather than to the user, so the *style* rules rightly do not reach
 		-- it -- but a preference like "always answer in Spanish" or "I build obby
@@ -554,7 +575,11 @@ Background chat:
 			parts[#parts + 1] = ""
 			parts[#parts + 1] = tostring(opts.extra)
 		end
-		return table.concat(parts, "\n")
+		return table.concat(parts, "\n"), #static
+	end
+
+	function M.subagent(task, opts)
+		return (M.subagentWithPrefix(task, opts))
 	end
 
 	-- Used by context compaction: a cheap call that turns dropped turns into a

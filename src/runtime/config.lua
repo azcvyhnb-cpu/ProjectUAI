@@ -102,6 +102,13 @@ return function(env)
 			contextFraction = 0.8,
 			keepTurns = 14,
 			compaction = true,
+			-- Describe only the core tool groups up front; the rest are named by
+			-- tools_load and sent once a conversation loads them. Roughly halves the
+			-- tool schemas every request carries.
+			lazyTools = true,
+			-- Explicit cache breakpoints on Messages-API requests. Chat-completions
+			-- providers cache stable prefixes automatically and need no field.
+			promptCache = true,
 			stream = true,
 			temperature = 0.4,
 			-- Reasoning depth: sent as `reasoning_effort` on chat completions and as

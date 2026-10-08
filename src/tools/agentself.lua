@@ -732,6 +732,78 @@ return function(env)
 			run = statusResult,
 		},
 		{
+			-- On-demand tool groups. Only offered while agent.lazyTools is on and the
+			-- conversation can see at least one deferred group; the registry appends it
+			-- after the core list rather than at this position.
+			name = "tools_load",
+			risk = "read",
+			lazyOnly = true,
+			description = "Load additional tool groups for this conversation.",
+			describe = function(opts)
+				local catalog = env.require("agent/registry").deferredCatalog(opts)
+				local lines = {
+					"Load more tool groups. Only core tools are described up front; the groups below",
+					"exist but their schemas are sent only after you load them. Load every group a task",
+					"needs in ONE call, then use its tools from your next step. Loading lasts for this",
+					"conversation. Groups:",
+				}
+				for _, entry in ipairs(catalog) do
+					lines[#lines + 1] = "- " .. entry.group .. " (" .. entry.label .. "): " .. table.concat(entry.names, ", ")
+				end
+				return table.concat(lines, "\n")
+			end,
+			parameters = {
+				type = "object",
+				properties = {
+					groups = {
+						type = "array",
+						description = "Group ids to load, e.g. [\"remotes\", \"coding\"].",
+						items = { type = "string" },
+					},
+				},
+				required = { "groups" },
+			},
+			run = function(args, ctx)
+				local registry = env.require("agent/registry")
+				local session = ctx and ctx.session
+				if not session then return { ok = false, text = "No conversation to load tools into." } end
+				local _, byGroup = registry.deferredCatalog({
+					groups = session.toolGroups, exclude = session.toolExclude, only = session.toolFilter,
+				})
+				session.loadedGroups = session.loadedGroups or {}
+				local loaded, already, unknown = {}, {}, {}
+				for _, raw in ipairs(type(args.groups) == "table" and args.groups or {}) do
+					local group = util.trim(tostring(raw)):lower()
+					local entry = byGroup[group]
+					if not entry then
+						unknown[#unknown + 1] = group
+					elseif session.loadedGroups[group] then
+						already[#already + 1] = group
+					else
+						session.loadGeneration = (session.loadGeneration or 0) + 1
+						session.loadedGroups[group] = session.loadGeneration
+						loaded[#loaded + 1] = group .. ": " .. table.concat(entry.names, ", ")
+					end
+				end
+				local lines = {}
+				if #loaded > 0 then
+					lines[#lines + 1] = "Loaded. Full definitions are available from your next step."
+					for _, line in ipairs(loaded) do lines[#lines + 1] = "- " .. line end
+				end
+				if #already > 0 then lines[#lines + 1] = "Already loaded: " .. table.concat(already, ", ") .. "." end
+				if #unknown > 0 then
+					local valid = {}
+					for group in pairs(byGroup) do valid[#valid + 1] = group end
+					table.sort(valid)
+					lines[#lines + 1] = "Not loadable here: " .. table.concat(unknown, ", ") .. ". Available: "
+						.. (#valid > 0 and table.concat(valid, ", ") or "none") .. "."
+				end
+				if #lines == 0 then lines[1] = "No groups named. Pass groups, e.g. [\"remotes\"]." end
+				return { ok = #loaded > 0 or #already > 0, text = table.concat(lines, "\n"),
+					data = { loaded = #loaded, already = #already, unknown = #unknown } }
+			end,
+		},
+		{
 			name = "wait",
 			risk = "read",
 			description = "Pause for a few seconds before continuing, to let something in the game settle or a change take effect.",

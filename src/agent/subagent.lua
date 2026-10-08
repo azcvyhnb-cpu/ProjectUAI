@@ -755,8 +755,9 @@ return function(env)
 		-- later -- is built against the environment and the switches in force then.
 		-- Carrying it on the session, instead of swapping the prompt module's builder, is
 		-- what makes two subagents dispatched in the same batch safe.
-		child.systemPrompt = function()
-			return prompt.subagent(task_text, {
+		child.systemPrompt = function(build)
+			return prompt.subagentWithPrefix(task_text, {
+				date = type(build) == "table" and build.date or nil,
 				extra = (opts.extra or "") .. "\nNative workspace references are shared with the user. Respect this subagent's tool scope; never use a controller or generated script to bypass a denied native action.",
 				unlimited = M.unlimited(),
 			})

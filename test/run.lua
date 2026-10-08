@@ -778,6 +778,146 @@ scenario("read-only mode hides everything that writes", function()
 	truthy("auto mode offers more", #all > #definitions)
 end)
 
+-- Phase 1: request size and caching ---------------------------------------
+
+scenario("core tools are sent and other groups load on demand", function()
+	local step = 0
+	local harness, handle = bootWith({
+		handler = function(entry)
+			if not tostring(entry.url):find("/chat/completions") then return { StatusCode = 404, Body = "{}" } end
+			step = step + 1
+			if step == 1 then
+				return { StatusCode = 200, Body = chatBody({ toolCalls = { toolCall("l1", "tools_load", { groups = { "world", "nope" } }) } }) }
+			elseif step == 2 then
+				return { StatusCode = 200, Body = chatBody({ toolCalls = { toolCall("r1", "remotes_list", {}) } }) }
+			end
+			return { StatusCode = 200, Body = chatBody({ content = "done" }) }
+		end,
+	})
+	handle.config.set("permissions.mode", "full")
+	local session = handle.sessions.current()
+	session.send("look around")
+	harness.settle(30)
+
+	local requests = chatRequests(harness)
+	check("three requests were made", #requests, 3)
+	local function names(index)
+		local out, order = {}, {}
+		for position, tool in ipairs(json.decode(requests[index].body).tools or {}) do
+			out[tool["function"].name] = position
+			order[#order + 1] = tool["function"].name
+		end
+		return out, order
+	end
+	local first, firstOrder = names(1)
+	truthy("core tools are offered", first.file_read and first.instance_find and first.run_luau)
+	truthy("the loader is offered", first.tools_load)
+	check("a deferred group is not described yet", first.raycast, nil)
+	check("nor is the remotes group", first.remotes_list, nil)
+	local loaderText = json.decode(requests[1].body).tools[first.tools_load]["function"].description
+	contains("the loader lists deferred groups by tool name", loaderText, "raycast")
+
+	local second, secondOrder = names(2)
+	truthy("a loaded group arrives on the next step", second.raycast)
+	truthy("appended after the core list", second.raycast > second.tools_load)
+	local prefixKept = true
+	for index, name in ipairs(firstOrder) do
+		if secondOrder[index] ~= name then prefixKept = false end
+	end
+	truthy("loading keeps the earlier tool list as an exact prefix", prefixKept)
+	local loadResult
+	for _, message in ipairs(session.ctx.messages) do
+		if message.role == "tool" and message.tool_call_id == "l1" then loadResult = message.content end
+	end
+	contains("an unknown group is named back", loadResult or "", "Not loadable here: nope")
+
+	local third = names(3)
+	truthy("a deferred tool called by name promotes its group", third.remotes_list)
+	check("the session finished", session.busy, false)
+
+	handle.config.set("agent.lazyTools", false)
+	local all = handle.tools.definitions({ lazy = true })
+	local everything = {}
+	for _, tool in ipairs(all) do everything[tool["function"].name] = true end
+	truthy("switching it off sends every group again", everything.raycast and everything.remotes_list)
+	check("and no loader", everything.tools_load, nil)
+end)
+
+scenario("subagent presets can still reach their deferred groups", function()
+	local harness, handle = bootWith({ provider = false })
+	local registry = handle.env.require("agent/registry")
+	local subagent = handle.env.require("agent/subagent")
+	local preset = subagent.PRESETS.web
+	local defs = registry.definitions({ groups = preset, lazy = true })
+	local seen = {}
+	for _, tool in ipairs(defs) do seen[tool["function"].name] = true end
+	truthy("a preset with a deferred group gets the loader", seen.tools_load)
+	check("without the deferred schemas", seen.http_request, nil)
+	truthy("and keeps its core tools", seen.web_search)
+	local catalog = registry.deferredCatalog({ groups = preset })
+	check("its catalogue names only groups in the preset", #catalog == 1 and catalog[1].group, "net")
+end)
+
+scenario("the system prompt keeps its stable part first", function()
+	local harness, handle = bootWith({ provider = false })
+	local prompt = handle.env.require("agent/prompt")
+	local textA, prefixA = prompt.buildWithPrefix({ model = "m", date = "2026-01-01 00:00 UTC" })
+	local textB, prefixB = prompt.buildWithPrefix({ model = "m", date = "2026-01-01 00:07 UTC" })
+	check("the prefix length is stable", prefixA, prefixB)
+	check("the prefix bytes are identical across dates", textA:sub(1, prefixA), textB:sub(1, prefixB))
+	contains("the date is in the tail", textA:sub(prefixA + 1), "2026-01-01 00:00 UTC")
+	check("the plain builder still returns one string", type(prompt.build({ model = "m" })), "string")
+	check("and only one value", select("#", prompt.build({ model = "m" })), 1)
+	local sub, subPrefix = prompt.subagentWithPrefix("find X", { date = "2026-01-01 00:00 UTC" })
+	local other, otherPrefix = prompt.subagentWithPrefix("find Y", { date = "2026-01-02 00:00 UTC" })
+	check("sibling subagents share one prefix", sub:sub(1, subPrefix), other:sub(1, otherPrefix))
+	contains("the task follows it", sub:sub(subPrefix + 1), "find X")
+end)
+
+scenario("Messages caching counts cached tokens and survives a refusal", function()
+	local step, bodies = 0, {}
+	local harness = envMock.new({})
+	harness.http.handler = function(entry)
+		if not tostring(entry.url):find("/messages") then return { StatusCode = 404, Body = "{}" } end
+		step = step + 1
+		bodies[#bodies + 1] = json.decode(entry.body)
+		if step == 1 then
+			return { StatusCode = 400, Body = json.encode({ type = "error", error = { type = "invalid_request_error",
+				message = "cache_control: Extra inputs are not permitted" } }) }
+		end
+		return { StatusCode = 200, Body = json.encode({
+			id = "msg_c", type = "message", role = "assistant", model = "claude-opus-5",
+			content = { { type = "text", text = "ok" } }, stop_reason = "end_turn",
+			usage = { input_tokens = 50, cache_read_input_tokens = 9000, cache_creation_input_tokens = 1000, output_tokens = 5 },
+		}) }
+	end
+	local handle = select(1, harness.boot())
+	harness.settle(1)
+	local record = handle.providers.blank("anthropic-messages")
+	record.label = "Claude"; record.apiKey = "sk-ant-harness"; record.model = "claude-opus-5"
+	record.models = { "claude-opus-5" }; record.stream = false
+	truthy("saved", handle.providers.save(record))
+	harness.settle(1)
+	local session = handle.sessions.current()
+	session.send("hi")
+	harness.settle(14)
+	check("the refused request was retried once", #bodies, 2)
+	truthy("the first carried cache breakpoints", type(bodies[1].system) == "table")
+	check("the retry dropped them", type(bodies[2].system), "string")
+	check("and no tool keeps one", (function()
+		for _, tool in ipairs(bodies[2].tools or {}) do if tool.cache_control then return "found" end end
+		return "none"
+	end)(), "none")
+	truthy("the refusal is remembered", handle.providers.active().promptCacheRefused ~= nil)
+	local usage = handle.env.require("agent/usage")
+	check("prompt tokens include cache reads and writes", usage.session.prompt, 10050)
+	check("cached reads are counted", usage.session.cached, 9000)
+
+	session.send("again")
+	harness.settle(14)
+	check("a later turn sends no caching field", type(bodies[#bodies].system), "string")
+end)
+
 -- 10. Loop safety ----------------------------------------------------------
 
 scenario("an identical repeated call is broken", function()
@@ -2581,8 +2721,16 @@ scenario("the Anthropic Messages API is spoken natively", function()
 	check("and versioned", requests[1] and requests[1].headers["anthropic-version"], "2023-06-01")
 
 	local first = json.decode(requests[1].body)
+	-- Hoisted as text blocks: the stable prefix carries a cache breakpoint and the
+	-- per-turn environment follows it uncached.
 	truthy("the system prompt is hoisted to a top-level field",
-		type(first.system) == "string" and #first.system > 0)
+		type(first.system) == "table" and #first.system == 2 and first.system[1].type == "text"
+		and #first.system[1].text > 0 and #first.system[2].text > 0)
+	check("the stable prefix is the cached block", first.system[1].cache_control and first.system[1].cache_control.type, "ephemeral")
+	check("the environment block is not cached", first.system[2].cache_control, nil)
+	contains("the environment follows the prefix", first.system[2].text, "Environment:")
+	check("the last tool carries the tool-list breakpoint",
+		first.tools[#first.tools].cache_control and first.tools[#first.tools].cache_control.type, "ephemeral")
 	check("so no message carries the system role", (function()
 		for _, message in ipairs(first.messages or {}) do
 			if message.role == "system" then return "found one" end

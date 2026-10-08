@@ -308,6 +308,10 @@ return function(env)
 
 		local lastSignature, streak = "", 0
 		local finalText = nil
+		-- One timestamp per turn. The environment block is rebuilt every step, and a
+		-- minute ticking over inside it would change the prompt bytes mid-turn and
+		-- void the provider's prefix cache for everything after it.
+		local turnDate = os.date("!%Y-%m-%d %H:%M UTC")
 		local turn = 0
 
 		while unlimited or turn < maxTurns do
@@ -326,13 +330,14 @@ return function(env)
 			-- A session may carry its own brief. A subagent does: it answers to the
 			-- parent agent rather than to the user, so inheriting the main prompt
 			-- would have it write a chat reply instead of a report.
-			local systemText
+			local systemText, cachePrefix
 			if type(session.systemPrompt) == "function" then
-				systemText = session.systemPrompt()
+				systemText, cachePrefix = session.systemPrompt({ date = turnDate })
 			elseif type(session.systemPrompt) == "string" and util.trim(session.systemPrompt) ~= "" then
 				systemText = session.systemPrompt
 			else
-				systemText = prompt.build({
+				systemText, cachePrefix = prompt.buildWithPrefix({
+					date = turnDate,
 					model = record and record.model or nil,
 					provider = record and record.label or nil,
 					-- Which conversation this is for. The task list rides on the session,
@@ -351,11 +356,13 @@ return function(env)
 				exclude.conversation_rename = true
 			end
 			local request = {
-				messages = ctx.wire(systemText),
+				messages = ctx.wire(systemText, cachePrefix),
 				tools = registry.definitions({
 					only = session.toolFilter,
 					groups = session.toolGroups,
 					exclude = exclude,
+					lazy = true,
+					loaded = session.loadedGroups,
 				}),
 				stream = session.stream,
 				onFrame = session.onFrame,
@@ -369,7 +376,7 @@ return function(env)
 			local summary = ctx.compact(summarise, { model = record and record.model, record = record, aborted = compactionAborted })
 			if summary then session.emit("compact", { summary = summary, before = before, after = ctx.tokens() }) end
 			if compactionAborted() then return stopped(session) end
-			request.messages = ctx.wire(systemText)
+			request.messages = ctx.wire(systemText, cachePrefix)
 
 			local result, err, usedRecord, accounting = complete(session, request, function(refusedRecord)
 				if session.aborted() then return false end
@@ -379,7 +386,7 @@ return function(env)
 					force = true, aborted = compactionAborted })
 				if not folded then return false end
 				session.emit("compact", { summary = folded, before = prior, after = ctx.tokens() })
-				request.messages = ctx.wire(systemText)
+				request.messages = ctx.wire(systemText, cachePrefix)
 				return true
 			end)
 			record = usedRecord or record
@@ -456,6 +463,16 @@ return function(env)
 					for _, call in ipairs(result.toolCalls) do
 						local fn = call["function"] or {}
 						local tool = registry.get(fn.name)
+						-- A deferred tool called by name (the prompt mentions several)
+						-- still runs; its group is promoted so the next step carries the
+						-- schema it was missing.
+						if tool and registry.isDeferred(tool.group) then
+							session.loadedGroups = session.loadedGroups or {}
+							if not session.loadedGroups[tool.group] then
+								session.loadGeneration = (session.loadGeneration or 0) + 1
+								session.loadedGroups[tool.group] = session.loadGeneration
+							end
+						end
 						session.emit("tool:call", {
 							id = call.id,
 							name = fn.name,
