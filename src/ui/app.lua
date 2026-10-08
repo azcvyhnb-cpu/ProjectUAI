@@ -162,8 +162,13 @@ return function(env)
 		quickchat.mount(overlay.layer)
 		quickchat.bind()
 
-		M.buildLauncher()
-		M.buildWindow()
+		-- WindUI owns the presentation layer. The agent, panel builders, session
+		-- wiring and runtime remain in this module; only the window/navigation chrome
+		-- moves behind the adapter.
+		local windShell = env.require("ui/wind_shell")
+		M.windShell = windShell.mount(M)
+		M.window = M.windShell.window
+		M.screen = M.windShell.screen or M.window.root
 
 		-- Layout switches retain the original panes. Theme changes (accent,
 		-- density, text scale, either font, the code palette, the reading width)
@@ -1637,21 +1642,26 @@ return function(env)
 		end
 		M.panels = {}
 		M.chatPanel = nil
-		M.sidebar = nil
-		M.titleLabel = nil
-		M.subtitleLabel = nil
-		if M.window then M.window.destroy() end
-		if M.launcher then
-			M.launcher:Destroy()
-			M.launcher = nil
-		end
 
+		if M.windShell then
+			pcall(function() M.windShell.destroy() end)
+			M.windShell = nil
+		end
+		M.window = nil
+		M.screen = nil
+		M.body = nil
 		M.panel = panel
-		M.buildLauncher()
-		M.buildWindow()
-		if wasVisible then M.window.show() end
+
+		local windShell = env.require("ui/wind_shell")
+		M.windShell = windShell.mount(M)
+		M.window = M.windShell.window
+		M.screen = M.windShell.screen or M.window.root
+
+		if wasVisible and M.window and not M.window.visible then
+			M.window.show()
+		end
 		M.setLauncherBusy(not wasVisible and sessions.busyCount() > 0)
-		log.debug("app", "rebuilt for " .. tostring(reason) .. " as " .. responsive.mode)
+		log.debug("app", "rebuilt for " .. tostring(reason) .. " with WindUI")
 	end
 
 	return M
