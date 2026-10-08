@@ -971,7 +971,7 @@ return function(env)
 			-- A socket setup failure before Send retains its existing HTTP fallback.
 			-- Once HTTP starts, proxy/key/parameter retries share its one deadline.
 			if not deadline then
-				deadline = requestStarted + math.max(1, math.min(300, tonumber(requestTimeout(request)) or 120)) * 1000
+				deadline = requestStarted + math.max(1, math.min(1800, tonumber(requestTimeout(request)) or 120)) * 1000
 				recovery = proxy.new(record, { aborted = request.aborted, onRetry = request.onRetry, deadlineMs = deadline })
 			end
 			local res, err = http.send({
@@ -1056,25 +1056,10 @@ return function(env)
 		end
 
 		-- The executor's transport wall: no body, no headers, an executor raise for
-		-- the error text, and no config value can lift that wall because the option
-		-- was never honoured. Retry once with a smaller ask -- less thinking, half the
-		-- reply ceiling -- so the model finishes inside the wall instead of dying at
-		-- it. Only when an HTTP request produced nothing after 20-130 seconds,
-		-- and only when the smaller ask is actually smaller: a
-		-- deadline on an already-minimal body would re-send the same prompt to the
-		-- same wall, and that is the one outcome this must not do.
+		-- Do not reduce reasoning effort because a request is taking a long time.
+		-- Long reasoning is valid work; the 30-minute transport ceiling is the only
+		-- wall for a single inference.
 		local recoveredTokens
-		if not res and err and not http.terminal(err) and lastRequestMs >= 20000 and lastRequestMs <= 130000 then
-			local lowered, note = smallerAsk(body)
-			if lowered and util.encode(lowered) ~= util.encode(body) then
-				log.info("provider", record.label .. ": hit the transport wall, retrying smaller (" .. note .. ")")
-				if request.onRetry then
-					request.onRetry({ attempt = 1, attempts = 2, wait = 0, reason = note, status = 0 })
-				end
-				res, err = fireWithRotation(lowered)
-				if res and res.ok then recoveredTokens = lowered.max_tokens or lowered.max_completion_tokens end
-			end
-		end
 
 		if not res or not res.ok then
 			if registry.compatibilityKey(record) == requestScope then M.learnContextWindow(record, res) end
