@@ -86,7 +86,7 @@ return function(env)
 
         M.app = app
         M.window = makeWindow()
-        M.screen = M.window.root
+        M.screen = app.screen
         M.tabs = {}
         M.tabById = {}
 
