@@ -50,6 +50,7 @@ return function(env)
             if wrapper.native and not wrapper.native.Destroyed then
                 wrapper.native:Open()
                 wrapper.visible = true
+                if wrapper.onShow then pcall(wrapper.onShow) end
             end
         end
 
@@ -57,6 +58,7 @@ return function(env)
             if wrapper.native and not wrapper.native.Destroyed then
                 wrapper.native:Close()
                 wrapper.visible = false
+                if wrapper.onHide then pcall(wrapper.onHide) end
             end
         end
 
@@ -143,6 +145,7 @@ return function(env)
             local holder = M.holders and M.holders[id]
             if not tab or not holder then return false end
             M.selecting = true
+            app.body = holder
             app.showPanel(id)
             M.window.native:SelectTab(tab.Index)
             M.selecting = false
