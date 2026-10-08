@@ -359,7 +359,7 @@ return function(env)
 			attachments = { inlineLimit = env.require("runtime/attachments").INLINE_LIMIT,
 				maxBytes = env.require("runtime/attachments").MAX_BYTES, available = caps.fs },
 			runtime = config.get("bridge.runtime", "game"),
-			relayTimeout = config.get("bridge.requestTimeout", 180),
+			relayTimeout = config.get("bridge.requestTimeout", 1800),
 			sessionId = current.id,
 			player = env.plr and env.plr.DisplayName or "you",
 			settings = settings, theme = themeColors, loops = loops, todos = current.todos,
